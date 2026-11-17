@@ -1,0 +1,190 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: theme('fontFamily.sans');
+    color-scheme: dark; /* native selects, date pickers and scrollbars match the dark theme */
+  }
+  body {
+    background: theme('colors.page');
+    color: theme('colors.ink.DEFAULT');
+  }
+  ::selection {
+    background: rgba(246, 135, 42, 0.35);
+  }
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+}
+
+/* Landing showcase entrances (timed inside the 6-second intro) */
+@keyframes heroIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.55) translateY(24px);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes fadeUp {
+  0% {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes shelfIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(140px, -40px, 0) rotate(8deg) scale(0.8);
+  }
+  60% {
+    opacity: 1;
+    transform: translate3d(0, 6px, 0) rotate(-2deg) scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) rotate(0) scale(1);
+  }
+}
+@keyframes cardIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 28px, 0) scale(0.94);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+.intro-instant * {
+  animation: none !important;
+}
+
+.shelf-unit {
+  display: grid;
+  gap: 18px;
+  padding: 18px 14px 10px;
+  overflow: hidden; /* items slide in from outside the unit; nothing may widen the page */
+  border-radius: 18px;
+  background: linear-gradient(180deg, #e9eef6, #dfe6f1);
+  border: 1px solid theme('colors.line');
+  box-shadow: inset 0 1px 0 #fff;
+}
+.shelf-row {
+  display: grid;
+  grid-template-rows: 150px 14px;
+}
+.shelf-items {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-evenly;
+  gap: 8px;
+  padding: 0 8px 4px;
+  min-width: 0;
+}
+.shelf-item {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 124px;
+  height: 140px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  margin: 0;
+  will-change: transform, opacity;
+  transition: transform 0.25s;
+}
+.shelf-item:hover {
+  transform: translateY(-6px) scale(1.06);
+}
+.shelf-item img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  filter: drop-shadow(0 8px 10px rgba(14, 36, 85, 0.18));
+}
+.shelf-board {
+  border-radius: 3px;
+  background: linear-gradient(180deg, #c98a4a, #9c6a35 60%, #7a5128);
+  box-shadow: 0 6px 10px rgba(14, 36, 85, 0.22);
+}
+.product-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid theme('colors.line');
+  background: #fff;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.product-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 24px rgba(14, 36, 85, 0.1);
+}
+.product-pic {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 112px;
+  margin: 8px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f5f6f9, #e9eef6);
+}
+.product-pic img {
+  max-width: 85%;
+  max-height: 85%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  filter: drop-shadow(0 5px 6px rgba(14, 36, 85, 0.15));
+}
+@media (max-width: 640px) {
+  .shelf-row {
+    grid-template-rows: 110px 12px;
+  }
+  .shelf-item {
+    height: 100px;
+  }
+}
+
+/*
+ * Dark theme: a solid "bg-white" panel becomes a navy card everywhere. Translucent variants
+ * (bg-white/10 …) are separate classes and keep working as soft highlights.
+ */
+.bg-white {
+  background-color: theme('colors.surface');
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

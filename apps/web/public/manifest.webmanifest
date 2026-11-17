@@ -1,0 +1,9 @@
+{
+  "name": "NCET General Store POS",
+  "short_name": "Store POS",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F5F6F9",
+  "theme_color": "#0E2455",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

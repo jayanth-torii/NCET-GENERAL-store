@@ -1,0 +1,45 @@
+name: ncet-store-pos
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: storepos
+      POSTGRES_USER: storepos
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-storepos_dev_password}
+      TZ: Asia/Kolkata
+      PGTZ: Asia/Kolkata
+    ports:
+      - "127.0.0.1:5432:5432"   # database is never exposed outside the server
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storepos -d storepos"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Nightly pg_dump at 23:30 IST into ./backups (point BACKUP_DIR at the USB disk).
+  # Keeps 30 daily and 12 monthly copies. See ops/backup.sh.
+  backup:
+    image: postgres:16
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: storepos
+      PGPASSWORD: ${DB_PASSWORD:-storepos_dev_password}
+      PGDATABASE: storepos
+      TZ: Asia/Kolkata
+      BACKUP_AT: "23:30"
+    volumes:
+      - ${BACKUP_DIR:-../backups}:/backups
+      - ./backup.sh:/backup.sh:ro
+    # $$ stops Docker Compose from substituting these itself; the shell inside the container reads them.
+    entrypoint: ["/bin/bash", "-c", "while true; do if [ \"$$(date +%H:%M)\" = \"$$BACKUP_AT\" ]; then bash /backup.sh; sleep 61; fi; sleep 20; done"]
+
+volumes:
+  pgdata:
