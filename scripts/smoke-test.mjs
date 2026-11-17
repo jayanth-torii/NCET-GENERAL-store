@@ -207,6 +207,17 @@ async function main() {
   check(overRet.status === 400, 'cannot return more than sold');
   const ret1 = await mgr.client.post(`/sales/${ks.data.id}/returns`, { items: [{ saleItemId: det.items[0].id, qty: 1 }], reason: 'Student dropped course' });
   check(ret1.status === 201 && ret1.data.total === 80 && /^SR\//.test(ret1.data.returnNo), 'partial kit return refunds 80', ret1.data);
+
+  // FR-14: kit sales by section and the class order sheet
+  const kitRep = (await mgr.client.get(`/reports/kits?from=${today}&to=${today}`)).data;
+  const kitRow = kitRep.sections?.[0]?.rows?.find((x) => x.code === kit.data.code && x.section === '(no section given)');
+  check(kitRow?.qty === 3 && kitRow?.returned === 1 && kitRow?.amount === 240, 'section kit report counts kits sold and returned', kitRow);
+  check((await cashier.client.get(`/reports/kits`)).status === 403, 'cashier cannot open the section kit report');
+  const sheet = await mgr.client.get(`/reports/kits/order-sheet?kit=${kit.data.id}&section=II%20CSE%20A&students=45&format=json`);
+  check(sheet.status === 200 && sheet.data.sections[0].rows.length === 2 && sheet.data.sections[1].rows.length === 45, 'order sheet lists kit contents and one row per student', sheet.data?.sections?.map((x) => x.rows.length));
+  const sheetPdf = await mgr.client.get(`/reports/kits/order-sheet?kit=${kit.data.id}&section=II%20CSE%20A&students=45&format=pdf`);
+  check(sheetPdf.status === 200 && sheetPdf.type.startsWith('application/pdf') && sheetPdf.data.subarray(0, 4).toString() === '%PDF', 'order sheet downloads as PDF');
+  check((await mgr.client.get(`/reports/kits/order-sheet?kit=${kit.data.id}&students=999`)).status === 400, 'order sheet refuses more than 200 students');
   check((await mgr.client.post(`/sales/${ks.data.id}/cancel`, { reason: 'try after return' })).status === 409, 'bill with returns cannot be cancelled');
 
   console.log('\nNegative stock warning (R8)');

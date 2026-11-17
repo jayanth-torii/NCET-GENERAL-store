@@ -254,6 +254,17 @@ async function main() {
   check(true, 'manager posts the purchase to stock');
   await m.screenshot({ path: join(SHOTS, `${String(n++).padStart(2, '0')}-purchase-posted.png`), fullPage: true });
 
+  // FR-16: barcode labels from the posted purchase (headless print() is a no-op)
+  await m.getByRole('button', { name: 'Print barcode labels' }).click();
+  await m.getByRole('dialog').waitFor();
+  const labelBtn = m.getByRole('dialog').getByRole('button', { name: /^Print \d+ labels?$/ });
+  check(/^Print [1-9]\d* labels?$/.test(await labelBtn.innerText()), 'label dialog fills one label per piece received', await labelBtn.innerText());
+  await labelBtn.click();
+  await m.waitForSelector('#labels-frame', { state: 'attached', timeout: 10000 });
+  const svgCount = await m.frameLocator('#labels-frame').locator('.label svg').count();
+  check(svgCount > 0, `label sheet has barcodes (${svgCount} labels)`);
+  await m.waitForSelector('[role="dialog"]', { state: 'detached', timeout: 5000 }).catch(() => undefined);
+
   // Phone-width check of billing (rush tablet)
   const tablet = await browser.newContext({ viewport: { width: 820, height: 1180 } });
   const tp = await tablet.newPage();

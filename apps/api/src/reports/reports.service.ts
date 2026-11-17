@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Response } from 'express';
 import { SessionUser } from '../auth/auth.decorators';
@@ -396,6 +396,80 @@ export class ReportsService {
             { key: 'qty', label: 'Qty', type: 'qty' }, { key: 'rate', label: 'Rate', type: 'money' }, { key: 'discount', label: 'Disc', type: 'money' }, { key: 'amount', label: 'Amount', type: 'money' },
           ],
           rows: lineRows,
+        },
+      ],
+    };
+  }
+
+  // ---------------- Section kits (FR-14) ----------------
+
+  /** Kit sales by section. The section is the "Customer" typed on the bill (for example "II CSE A"). */
+  async kitSales(from: string, to: string, user: SessionUser): Promise<Report> {
+    const r = istRange(from, to);
+    const rows = await this.prisma.$queryRaw<{ code: string; name: string; section: string; bills: bigint; qty: Prisma.Decimal; amount: Prisma.Decimal; returned: Prisma.Decimal }[]>`
+      SELECT k.code, k.name, coalesce(nullif(trim(s.customer_name), ''), '(no section given)') AS section,
+             count(DISTINCT s.id) AS bills, sum(si.qty) AS qty, sum(si.line_total) AS amount,
+             coalesce(sum((SELECT sum(ri.qty) FROM sales_return_item ri WHERE ri.sale_item_id = si.id)), 0) AS returned
+      FROM sale_item si JOIN sale s ON s.id = si.sale_id JOIN kit k ON k.id = si.kit_id
+      WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end}
+      GROUP BY k.code, k.name, 3 ORDER BY k.name, 3`;
+    const data = rows.map((x) => ({ code: x.code, name: x.name, section: x.section, bills: n(x.bills), qty: n(x.qty), returned: n(x.returned), amount: n(x.amount) }));
+    const sum = (k: 'qty' | 'amount' | 'returned' | 'bills') => data.reduce((a, b) => a + b[k], 0);
+    return {
+      title: 'Section kit sales',
+      subtitle: `${fmtDate(from)} to ${fmtDate(to)}`,
+      fileName: `section_kits_${from}_to_${to}`,
+      ...this.meta(user),
+      summary: [
+        { label: 'Kits sold', value: sum('qty'), type: 'qty' },
+        { label: 'Kits returned', value: sum('returned'), type: 'qty' },
+        { label: 'Amount', value: sum('amount'), type: 'money' },
+        { label: 'Sections', value: new Set(data.map((d) => d.section)).size, type: 'int' },
+      ],
+      sections: [
+        {
+          title: 'By kit and section',
+          columns: [
+            { key: 'code', label: 'Kit code' }, { key: 'name', label: 'Kit' }, { key: 'section', label: 'Section (customer on bill)' }, { key: 'bills', label: 'Bills', type: 'int' },
+            { key: 'qty', label: 'Kits sold', type: 'qty' }, { key: 'returned', label: 'Returned', type: 'qty' }, { key: 'amount', label: 'Amount', type: 'money' },
+          ],
+          rows: data,
+          totals: { code: 'Total', bills: sum('bills'), qty: sum('qty'), returned: sum('returned'), amount: sum('amount') },
+          note: 'Type the section (for example "II CSE A") in the Customer box when billing a kit, so it is counted against that section.',
+        },
+      ],
+    };
+  }
+
+  /** Printable class order sheet for one kit: what the kit contains, then one row per student to tick paid / issued. */
+  async kitOrderSheet(kitId: number, section: string, students: number, user: SessionUser): Promise<Report> {
+    const kit = await this.prisma.kit.findUnique({ where: { id: kitId }, include: { items: { include: { product: { select: { code: true, name: true } } }, orderBy: { id: 'asc' } } } });
+    if (!kit) throw new NotFoundException('Kit not found');
+    const sec = section.trim() || '______________';
+    return {
+      title: `Order sheet · ${kit.name}`,
+      subtitle: `Section: ${sec} · Kit price Rs ${n(kit.price).toFixed(2)} · Kit code ${kit.code}`,
+      fileName: `order_sheet_${kit.code}_${section.trim().replace(/[^A-Za-z0-9]+/g, '_') || 'section'}`,
+      ...this.meta(user),
+      summary: [
+        { label: 'Kit price', value: n(kit.price), type: 'money' },
+        { label: 'Students', value: students, type: 'int' },
+        { label: 'Amount if all buy', value: n(kit.price) * students, type: 'money' },
+      ],
+      sections: [
+        {
+          title: 'The kit contains',
+          columns: [{ key: 'code', label: 'Code' }, { key: 'name', label: 'Item' }, { key: 'qty', label: 'Qty per kit', type: 'qty' }],
+          rows: kit.items.map((i) => ({ code: i.product.code, name: i.product.name, qty: n(i.qty) })),
+        },
+        {
+          title: 'Students',
+          columns: [
+            { key: 'sn', label: 'S.No', type: 'int' }, { key: 'roll', label: 'Roll no' }, { key: 'student', label: 'Student name' },
+            { key: 'paid', label: 'Paid (Rs)' }, { key: 'issued', label: 'Issued (tick)' }, { key: 'sign', label: 'Signature' },
+          ],
+          rows: Array.from({ length: students }, (_, i) => ({ sn: i + 1, roll: '', student: '', paid: '', issued: '', sign: '' })),
+          note: 'Bill the kits at the counter as one line each with the section in the Customer box. The "Section kits" report then totals this section.',
         },
       ],
     };

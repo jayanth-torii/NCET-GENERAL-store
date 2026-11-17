@@ -1,13 +1,74 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { get, qs } from '../lib/api';
+import { download, get, qs } from '../lib/api';
 import { MANAGE, PURCHASE, useAuth } from '../lib/auth';
+import { useKits } from '../lib/catalogue';
 import { monthStartIso, todayIso } from '../lib/format';
 import type { Category } from '../lib/types';
 import { ReportView } from '../components/ReportView';
-import { Field, Input, PageHeader, Select, Tabs } from '../components/ui';
+import { Button, Card, ErrorBox, Field, Input, PageHeader, Select, Tabs } from '../components/ui';
 
-type Tab = 'daily' | 'monthly' | 'register' | 'purchases' | 'yearly' | 'dead';
+type Tab = 'daily' | 'monthly' | 'register' | 'purchases' | 'kits' | 'yearly' | 'dead';
+
+/** FR-14: kit sales by section, plus a printable class order sheet for any kit. */
+function SectionKits({ from, to, today, setFrom, setTo }: { from: string; to: string; today: string; setFrom: (v: string) => void; setTo: (v: string) => void }) {
+  const kits = useKits();
+  const active = (kits.data ?? []).filter((k) => k.isActive);
+  const [kitId, setKitId] = useState('');
+  const [section, setSection] = useState('');
+  const [students, setStudents] = useState('60');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<unknown>(null);
+  const sheet = async () => {
+    setErr(null);
+    const n = Number(students);
+    if (!kitId) return setErr(new Error('Choose the kit for the order sheet.'));
+    if (!Number.isInteger(n) || n < 1 || n > 200) return setErr(new Error('Students must be a whole number from 1 to 200.'));
+    setBusy(true);
+    try {
+      await download(`/reports/kits/order-sheet${qs({ kit: kitId, section, students: n, format: 'pdf' })}`);
+    } catch (e) {
+      setErr(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Card title="Class order sheet" className="mb-5">
+        <div className="space-y-3 px-5 pb-5">
+          <p className="text-sm text-ink-mute">Print a sheet for a class: what the kit contains, then one row per student to note payment and tick when the kit is issued.</p>
+          <div className="grid gap-3 sm:grid-cols-[2fr_1.4fr_1fr_auto] sm:items-end">
+            <Field label="Kit">
+              {(id) => (
+                <Select id={id} value={kitId} onChange={(e) => setKitId(e.target.value)}>
+                  <option value="">Choose a kit…</option>
+                  {active.map((k) => (
+                    <option key={k.id} value={k.id}>
+                      {k.name} · ₹{k.price}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field label="Section">{(id) => <Input id={id} value={section} maxLength={40} placeholder="e.g. II CSE A" onChange={(e) => setSection(e.target.value)} />}</Field>
+            <Field label="Students">{(id) => <Input id={id} type="number" min={1} max={200} value={students} onChange={(e) => setStudents(e.target.value)} />}</Field>
+            <Button variant="primary" busy={busy} onClick={() => void sheet()}>
+              Download order sheet (PDF)
+            </Button>
+          </div>
+          {kits.data && active.length === 0 && <p className="text-sm text-amber-700">No active kits yet. Create one in Settings &amp; users → Section kits.</p>}
+          <ErrorBox error={err} />
+        </div>
+      </Card>
+      <div className="mb-4 grid max-w-md grid-cols-2 gap-3">
+        <Field label="From">{(id) => <Input id={id} type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value || from)} />}</Field>
+        <Field label="To">{(id) => <Input id={id} type="date" value={to} min={from} max={today} onChange={(e) => setTo(e.target.value || to)} />}</Field>
+      </div>
+      <ReportView path={`/reports/kits${qs({ from, to })}`} />
+    </>
+  );
+}
 
 function fyOptions(today: string) {
   const y = Number(today.slice(0, 4));
@@ -31,6 +92,7 @@ export function Reports() {
           { value: 'monthly' as Tab, label: 'Monthly sales' },
           { value: 'register' as Tab, label: 'Sales register' },
           { value: 'purchases' as Tab, label: 'Purchase register' },
+          { value: 'kits' as Tab, label: 'Section kits' },
         ]
       : []),
     ...(isStock
@@ -82,6 +144,7 @@ export function Reports() {
           <ReportView path={`/reports/${tab === 'register' ? 'sales' : 'purchases'}/register${qs({ from, to })}`} />
         </>
       )}
+      {tab === 'kits' && <SectionKits from={from} to={to} today={today} setFrom={setFrom} setTo={setTo} />}
       {tab === 'yearly' && (
         <>
           <div className="mb-4 grid max-w-md grid-cols-2 gap-3">

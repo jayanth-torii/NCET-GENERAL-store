@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, del, get, post, put } from '../lib/api';
 import { MANAGE, useAuth } from '../lib/auth';
 import { useCatalogue } from '../lib/catalogue';
+import { LabelItem, MAX_LABELS, printLabels } from '../lib/labels';
 import { date, dateTime, money, qty as fmtQty, r2, todayIso } from '../lib/format';
 import type { CatalogueItem, ChargeType, Product, Supplier } from '../lib/types';
 import { ProductForm } from '../components/ProductForm';
@@ -582,12 +583,95 @@ function DraftEditor({ p }: { p: PDetail }) {
   );
 }
 
+/** FR-16: choose how many labels per purchase line (default: the pieces received), then print an A4 label sheet. */
+function LabelsDialog({ open, onClose, items }: { open: boolean; onClose: () => void; items: PItem[] }) {
+  const cat = useCatalogue();
+  const settings = useQuery({ queryKey: ['settings'], queryFn: () => get<{ storeName: string }>('/settings'), staleTime: 60_000, enabled: open });
+  const [copies, setCopies] = useState<Record<number, string>>({});
+  const [err, setErr] = useState<unknown>(null);
+  useEffect(() => {
+    if (open) {
+      setErr(null);
+      setCopies(Object.fromEntries(items.map((i) => [i.id, String(Math.max(0, Math.floor(Number(i.baseQty) - Number(i.returnedQty))))])));
+    }
+  }, [open, items]);
+  const byId = cat.byId;
+  const total = items.reduce((a, i) => a + (Number(copies[i.id]) || 0), 0);
+  const go = async () => {
+    setErr(null);
+    const bad = items.find((i) => {
+      const v = copies[i.id] ?? '';
+      return v !== '' && (!/^\d+$/.test(v) || Number(v) > MAX_LABELS);
+    });
+    if (bad) return setErr(new Error(`${bad.product.name}: enter a whole number of labels from 0 to ${MAX_LABELS}.`));
+    const list: LabelItem[] = items
+      .filter((i) => Number(copies[i.id]) > 0)
+      .map((i) => {
+        const c = byId.get(i.productId);
+        return { name: i.product.name, code: i.product.code, barcode: c?.barcode ?? null, price: Number(c?.salePrice ?? 0), mrp: c?.mrp ?? null, copies: Number(copies[i.id]) };
+      });
+    try {
+      await printLabels(list, settings.data?.storeName ?? 'General Store');
+      onClose();
+    } catch (e) {
+      setErr(e);
+    }
+  };
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Print barcode labels"
+      wide
+      footer={
+        <>
+          <Button onClick={onClose}>Back</Button>
+          <Button variant="primary" onClick={() => void go()} disabled={!cat.data}>
+            Print {total} label{total === 1 ? '' : 's'}
+          </Button>
+        </>
+      }
+    >
+      <p className="mb-3 text-sm text-ink-mute">One label per piece received is filled in. Change any number, or set 0 to skip an item. Prints on an A4 sheet of 24 stickers (3 × 8).</p>
+      <Table>
+        <thead>
+          <tr>
+            <th className={th}>Item</th>
+            <th className={th}>Barcode on label</th>
+            <th className={cx(th, 'text-right')}>Price</th>
+            <th className={cx(th, 'text-right')}>Labels</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((i) => {
+            const c = byId.get(i.productId);
+            return (
+              <tr key={i.id}>
+                <td className={td}>{i.product.name}</td>
+                <td className={cx(td, 'font-mono text-xs')}>{c?.barcode || i.product.code}</td>
+                <td className={cx(td, num)}>{c ? money(c.salePrice) : ''}</td>
+                <td className={cx(td, 'w-28')}>
+                  <Input aria-label={`Labels for ${i.product.name}`} inputMode="numeric" className="h-9 text-right font-mono" value={copies[i.id] ?? ''} onChange={(e) => setCopies((x) => ({ ...x, [i.id]: e.target.value.trim() }))} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </Table>
+      <div className="mt-3">
+        <ErrorBox error={err} />
+      </div>
+    </Modal>
+  );
+}
+
 function PostedView({ p }: { p: PDetail }) {
   const { can } = useAuth();
   const qc = useQueryClient();
   const toast = useToast();
   const [cancelOpen, setCancelOpen] = useState(false);
   const [retOpen, setRetOpen] = useState(false);
+  const [labelsOpen, setLabelsOpen] = useState(false);
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['purchase', p.id] });
     void qc.invalidateQueries({ queryKey: ['purchases'] });
@@ -603,6 +687,7 @@ function PostedView({ p }: { p: PDetail }) {
             <Link to="/purchases">
               <Button variant="ghost">All purchases</Button>
             </Link>
+            {p.status === 'POSTED' && <Button onClick={() => setLabelsOpen(true)}>Print barcode labels</Button>}
             {p.status === 'POSTED' && can(...MANAGE) && <Button onClick={() => setRetOpen(true)}>Return to supplier</Button>}
             {p.status === 'POSTED' && can(...MANAGE) && p.returns.length === 0 && (
               <Button variant="danger" onClick={() => setCancelOpen(true)}>
@@ -613,6 +698,7 @@ function PostedView({ p }: { p: PDetail }) {
         }
       />
       {p.status === 'CANCELLED' && <p className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">Cancelled: {p.cancelReason}. Its stock was taken back out.</p>}
+      <LabelsDialog open={labelsOpen} onClose={() => setLabelsOpen(false)} items={p.items} />
       <Card>
         <Table>
           <thead>

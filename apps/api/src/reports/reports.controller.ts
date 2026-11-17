@@ -70,6 +70,30 @@ export class ReportsController {
     return this.reports.send(res, await this.reports.purchaseRegister(p.from, p.to, user, p.supplierId), p.format);
   }
 
+  /** FR-14: kit sales per section. */
+  @Roles(...R.MANAGE)
+  @Get('kits')
+  async kits(@Query() q: unknown, @CurrentUser() user: SessionUser, @Res() res: Response) {
+    const p = parse(RangeQ, q);
+    return this.reports.send(res, await this.reports.kitSales(p.from, p.to, user), p.format);
+  }
+
+  /** FR-14: printable class order sheet for one kit. */
+  @Roles(...R.MANAGE)
+  @Get('kits/order-sheet')
+  async kitOrderSheet(@Query() q: unknown, @CurrentUser() user: SessionUser, @Res() res: Response) {
+    const p = parse(
+      z.object({
+        kit: z.coerce.number().int().positive(),
+        section: z.string().trim().max(40).default(''),
+        students: z.coerce.number().int().min(1).max(200).default(60),
+        format: zFormat,
+      }),
+      q,
+    );
+    return this.reports.send(res, await this.reports.kitOrderSheet(p.kit, p.section, p.students, user), p.format);
+  }
+
   @Roles(...R.STOCK_VIEW)
   @Get('stock/summary')
   async stockSummary(@Query() q: unknown, @CurrentUser() user: SessionUser, @Res() res: Response) {
