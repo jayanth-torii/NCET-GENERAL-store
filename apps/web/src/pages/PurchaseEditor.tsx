@@ -26,8 +26,10 @@ interface PItem {
   landedUnitCost: number | null;
   batch: string | null;
   expiry: string | null;
+  salePrice: number | null;
+  mrp: number | null;
   returnedQty: number;
-  product: { code: string; name: string; unit: { code: string; allowDecimal: boolean }; packUnit: { code: string } | null; packSize: number };
+  product: { code: string; name: string; salePrice: number; mrp: number | null; unit: { code: string; allowDecimal: boolean }; packUnit: { code: string } | null; packSize: number };
 }
 interface PDetail {
   id: number;
@@ -72,6 +74,10 @@ interface LineForm {
   gstRate: string;
   batch: string;
   expiry: string;
+  salePrice: string; // new selling price; blank keeps the current one
+  mrp: string;
+  curPrice: number; // product master price now, shown as the hint
+  curMrp: number | null;
 }
 interface ChargeForm {
   key: string;
@@ -120,6 +126,10 @@ function DraftEditor({ p }: { p: PDetail }) {
       gstRate: String(Number(i.gstRate)),
       batch: i.batch ?? '',
       expiry: i.expiry ?? '',
+      salePrice: i.salePrice === null ? '' : String(Number(i.salePrice)),
+      mrp: i.mrp === null ? '' : String(Number(i.mrp)),
+      curPrice: Number(i.product.salePrice),
+      curMrp: i.product.mrp === null ? null : Number(i.product.mrp),
     })),
   );
   const [charges, setCharges] = useState<ChargeForm[]>(() => p.charges.map((c) => ({ key: String(c.id), chargeTypeId: String(c.chargeTypeId), amount: String(Number(c.amount)), paidTo: c.paidTo ?? '', referenceNo: c.referenceNo ?? '' })));
@@ -154,7 +164,8 @@ function DraftEditor({ p }: { p: PDetail }) {
   const hits = useMemo(() => cat.search(search, 8), [search, cat]);
 
   const addLine = (c: CatalogueItem | Product) => {
-    const item = 'unitCode' in c ? { id: c.id, code: c.code, name: c.name, unit: c.unitCode, allowDecimal: c.allowDecimal, packUnit: c.packUnitCode, packSize: Number(c.packSize), gstRate: Number(c.gstRate), lastCost: c.lastCost } : { id: c.id, code: c.code, name: c.name, unit: c.unit, allowDecimal: c.allowDecimal, packUnit: c.packUnit, packSize: Number(c.packSize), gstRate: Number(c.gstRate), lastCost: c.lastCost };
+    const common = { id: c.id, code: c.code, name: c.name, allowDecimal: c.allowDecimal, packSize: Number(c.packSize), gstRate: Number(c.gstRate), lastCost: c.lastCost, salePrice: Number(c.salePrice), mrp: c.mrp === null ? null : Number(c.mrp) };
+    const item = 'unitCode' in c ? { ...common, unit: c.unitCode, packUnit: c.packUnitCode } : { ...common, unit: c.unit, packUnit: c.packUnit };
     setLines((ls) => [
       ...ls,
       {
@@ -174,6 +185,10 @@ function DraftEditor({ p }: { p: PDetail }) {
         gstRate: String(item.gstRate),
         batch: '',
         expiry: '',
+        salePrice: '',
+        mrp: '',
+        curPrice: item.salePrice,
+        curMrp: item.mrp,
       },
     ]);
     setSearch('');
@@ -200,6 +215,8 @@ function DraftEditor({ p }: { p: PDetail }) {
       gstRate: nz(l.gstRate),
       batch: l.batch || null,
       expiry: l.expiry || null,
+      salePrice: l.salePrice.trim() === '' ? null : Number(l.salePrice),
+      mrp: l.mrp.trim() === '' ? null : Number(l.mrp),
     })),
     charges: charges.map((c) => ({ chargeTypeId: Number(c.chargeTypeId), amount: Number(c.amount), paidTo: c.paidTo || null, referenceNo: c.referenceNo || null })),
     billDiscount: nz(billDiscount),
@@ -210,6 +227,11 @@ function DraftEditor({ p }: { p: PDetail }) {
     for (const [i, l] of lines.entries()) {
       if (!(Number(l.enteredQty) > 0)) return `Line ${i + 1} (${l.name}): enter the quantity`;
       if (l.value.trim() === '' || Number.isNaN(Number(l.value))) return `Line ${i + 1} (${l.name}): enter the ${l.mode === 'rate' ? 'rate' : 'line amount'}`;
+      const sp = l.salePrice.trim() === '' ? null : Number(l.salePrice);
+      const mrp = l.mrp.trim() === '' ? l.curMrp : Number(l.mrp);
+      if (sp !== null && !(sp > 0)) return `Line ${i + 1} (${l.name}): sale price must be more than zero`;
+      if (l.mrp.trim() !== '' && !(Number(l.mrp) > 0)) return `Line ${i + 1} (${l.name}): MRP must be more than zero`;
+      if (mrp !== null && (sp ?? l.curPrice) > mrp) return `Line ${i + 1} (${l.name}): sale price ${sp ?? l.curPrice} is above the MRP ${mrp}`;
     }
     for (const [i, c] of charges.entries()) {
       if (!c.chargeTypeId) return `Charge ${i + 1}: choose the type`;
@@ -278,7 +300,7 @@ function DraftEditor({ p }: { p: PDetail }) {
   return (
     <div className="space-y-4">
       <PageHeader
-        title={`Draft purchase #${p.id}`}
+        title={`${p.purchaseNo ?? `Draft #${p.id}`} · draft purchase`}
         subtitle={
           server.readyAt
             ? `Started by ${p.createdBy.fullName}, marked ready by ${server.readyBy?.fullName ?? 'the store keeper'}. Waiting for a manager to post it.`
@@ -308,8 +330,8 @@ function DraftEditor({ p }: { p: PDetail }) {
         }
       />
 
-      <Card title="Supplier bill">
-        <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
+      <Card title="Supplier bill" actions={p.purchaseNo && <span className="rounded-md bg-brand-500/15 px-2.5 py-1 font-mono text-sm font-semibold text-brand-500">GRN No: {p.purchaseNo}</span>}>
+        <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-5">
           <Field label="Supplier">
             {(id) => (
               <Select id={id} value={header.supplierId} onChange={(e) => (setHeader((h) => ({ ...h, supplierId: e.target.value })), touch())}>
@@ -321,8 +343,20 @@ function DraftEditor({ p }: { p: PDetail }) {
               </Select>
             )}
           </Field>
+          {(() => {
+            const s = suppliers.data?.find((x) => String(x.id) === header.supplierId);
+            return (
+              <div className="col-span-full -mt-1 font-mono text-xs text-ink-mute sm:order-last">
+                Supplier GST no: <span className={s?.gstin ? 'text-brand-500' : ''}>{s?.gstin ?? 'not registered'}</span>
+                {s?.phone && <> · Ph {s.phone}</>}
+              </div>
+            );
+          })()}
           <Field label="Invoice / DC no">{(id) => <Input id={id} value={header.supplierInvoiceNo} onChange={(e) => (setHeader((h) => ({ ...h, supplierInvoiceNo: e.target.value })), touch())} className="font-mono" />}</Field>
           <Field label="Invoice date">{(id) => <Input id={id} type="date" max={todayIso()} value={header.invoiceDate} onChange={(e) => (setHeader((h) => ({ ...h, invoiceDate: e.target.value })), touch())} />}</Field>
+          <Field label="Invoice amount ₹">
+            {(id) => <Input id={id} inputMode="decimal" className="text-right font-mono font-semibold" value={invoiceTotal} placeholder="Bill grand total" onChange={(e) => (setInvoiceTotal(e.target.value), touch())} />}
+          </Field>
           <div className="flex items-end pb-2">
             <Checkbox label="Rates include GST" checked={header.taxInclusive} onChange={(v) => (setHeader((h) => ({ ...h, taxInclusive: v })), touch())} />
           </div>
@@ -333,7 +367,7 @@ function DraftEditor({ p }: { p: PDetail }) {
         title="Items"
         actions={
           <span className="text-xs text-ink-mute">
-            Enter boxes or pieces, then the rate <i>or</i> the line amount printed on the bill.
+            Enter boxes or pieces, then the rate <i>or</i> the line amount printed on the bill. A new sale price / MRP is applied when the GRN is posted; leave blank to keep the current one.
           </span>
         }
       >
@@ -350,6 +384,8 @@ function DraftEditor({ p }: { p: PDetail }) {
               <th className={th}>Batch / expiry</th>
               <th className={cx(th, 'text-right')}>Pieces</th>
               <th className={cx(th, 'text-right')}>Landed / pc</th>
+              <th className={cx(th, 'text-right')}>Sale price ₹</th>
+              <th className={cx(th, 'text-right')}>MRP ₹</th>
               <th className={th} />
             </tr>
           </thead>
@@ -403,6 +439,19 @@ function DraftEditor({ p }: { p: PDetail }) {
                     {fmtQty(base)} {l.unit}
                   </td>
                   <td className={cx(td, num)}>{landed !== null && landed !== undefined ? money(landed) : <span className="text-ink-mute">save</span>}</td>
+                  <td className={cx(td, 'w-28')}>
+                    <Input aria-label="Sale price" inputMode="decimal" className="text-right font-mono" value={l.salePrice} placeholder={money(l.curPrice)} onChange={(e) => setLine(i, { salePrice: e.target.value })} />
+                    {(() => {
+                      const sp = l.salePrice.trim() === '' ? l.curPrice : Number(l.salePrice);
+                      const cost = landed !== null && landed !== undefined ? Number(landed) : null;
+                      if (cost === null || !(sp > 0)) return <div className="mt-0.5 text-right text-[11px] text-ink-mute">now {money(l.curPrice)}</div>;
+                      const m = ((sp - cost) / sp) * 100;
+                      return <div className={cx('mt-0.5 text-right text-[11px]', m < 0 ? 'text-rose-700' : 'text-ink-mute')}>margin {m.toFixed(1)}%</div>;
+                    })()}
+                  </td>
+                  <td className={cx(td, 'w-28')}>
+                    <Input aria-label="MRP" inputMode="decimal" className="text-right font-mono" value={l.mrp} placeholder={l.curMrp === null ? '—' : money(l.curMrp)} onChange={(e) => setLine(i, { mrp: e.target.value })} />
+                  </td>
                   <td className={td}>
                     <button className="rounded px-2 py-1 text-ink-mute hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${l.name}`} onClick={() => (setLines((ls) => ls.filter((_, j) => j !== i)), touch())}>
                       ✕
@@ -527,12 +576,13 @@ function DraftEditor({ p }: { p: PDetail }) {
               <dt className="font-sans font-semibold">Computed total</dt>
               <dd className="text-right font-semibold">{money(est.total)}</dd>
             </dl>
-            <Field label="Grand total printed on the supplier bill">
-              {(id) => <Input id={id} inputMode="decimal" className="h-12 text-right font-mono text-xl" value={invoiceTotal} onChange={(e) => (setInvoiceTotal(e.target.value), touch())} />}
-            </Field>
+            <div className="flex items-baseline justify-between rounded-md bg-paper px-3 py-2">
+              <span className="text-sm text-ink-mute">Invoice amount (supplier bill)</span>
+              <span className="font-mono text-xl font-semibold">{invoiceTotal.trim() === '' ? '—' : money(Number(invoiceTotal))}</span>
+            </div>
             <div className={cx('rounded-md px-3 py-2 text-sm', diff === null ? 'bg-paper text-ink-mute' : matched ? 'bg-navy-50 text-navy-700' : 'bg-rose-50 text-rose-700')}>
               {diff === null ? (
-                'Type the bill total to check it.'
+                'Type the invoice amount (top of the page) to check it.'
               ) : matched ? (
                 <>Matches the supplier bill{diff !== 0 && <> (round-off {money(diff)})</>}. Ready to post.</>
               ) : (
@@ -712,6 +762,7 @@ function PostedView({ p }: { p: PDetail }) {
               <th className={cx(th, 'text-right')}>GST</th>
               <th className={cx(th, 'text-right')}>Line total</th>
               <th className={cx(th, 'text-right')}>Landed / pc</th>
+              <th className={cx(th, 'text-right')}>Sale price set</th>
               <th className={cx(th, 'text-right')}>Returned</th>
             </tr>
           </thead>
@@ -736,6 +787,10 @@ function PostedView({ p }: { p: PDetail }) {
                 <td className={cx(td, num)}>{Number(i.taxAmount) ? money(i.taxAmount) : ''}</td>
                 <td className={cx(td, num)}>{money(i.lineTotal)}</td>
                 <td className={cx(td, num, 'text-navy-700')}>{i.landedUnitCost === null ? '' : money(i.landedUnitCost)}</td>
+                <td className={cx(td, num)}>
+                  {i.salePrice === null ? '' : money(i.salePrice)}
+                  {i.mrp !== null && <div className="text-xs text-ink-mute">MRP {money(i.mrp)}</div>}
+                </td>
                 <td className={cx(td, num)}>{Number(i.returnedQty) ? fmtQty(i.returnedQty) : ''}</td>
               </tr>
             ))}

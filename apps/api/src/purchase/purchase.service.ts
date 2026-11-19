@@ -24,6 +24,7 @@ export const PurchaseHeader = z.object({
   invoiceDate: zDate.refine(notFuture, 'Invoice date cannot be in the future'),
   taxInclusive: z.boolean().default(true),
   notes: zOptText(300),
+  invoiceTotal: zMoney.optional().nullable(), // invoice amount printed on the supplier bill
 });
 
 export const PurchaseLine = z
@@ -37,11 +38,15 @@ export const PurchaseLine = z
     gstRate: zGst.optional().nullable(),
     batch: zOptText(30),
     expiry: zDate.optional().nullable(),
+    salePrice: zMoney.optional().nullable(), // new selling price; blank keeps the current one
+    mrp: zMoney.optional().nullable(),
   })
   .refine((l) => (l.rate !== null && l.rate !== undefined) !== (l.amount !== null && l.amount !== undefined), {
     message: 'Enter either the rate or the line amount',
     path: ['rate'],
-  });
+  })
+  .refine((l) => l.salePrice === null || l.salePrice === undefined || l.salePrice > 0, { message: 'Sale price must be more than zero', path: ['salePrice'] })
+  .refine((l) => l.mrp === null || l.mrp === undefined || l.mrp > 0, { message: 'MRP must be more than zero', path: ['mrp'] });
 
 export const PurchaseDraft = PurchaseHeader.extend({
   lines: z.array(PurchaseLine).max(300),
@@ -86,16 +91,21 @@ export class PurchaseService {
   async createDraft(input: z.infer<typeof PurchaseHeader>, user: SessionUser) {
     await this.loadSupplier(input.supplierId);
     await this.assertInvoiceFree(input.supplierId, input.supplierInvoiceNo);
-    const p = await this.prisma.purchase.create({
-      data: {
-        supplierId: input.supplierId,
-        supplierInvoiceNo: input.supplierInvoiceNo,
-        invoiceDate: new Date(`${input.invoiceDate}T00:00:00Z`),
-        taxInclusive: input.taxInclusive,
-        notes: input.notes ?? null,
-        createdById: user.id,
-      },
-    });
+    // The GRN number is given the moment the bill is first saved, so it can be written on the supplier bill.
+    const p = await this.prisma.$transaction(async (tx) =>
+      tx.purchase.create({
+        data: {
+          purchaseNo: await nextDocNo(tx, 'GRN'),
+          supplierId: input.supplierId,
+          supplierInvoiceNo: input.supplierInvoiceNo,
+          invoiceDate: new Date(`${input.invoiceDate}T00:00:00Z`),
+          taxInclusive: input.taxInclusive,
+          notes: input.notes ?? null,
+          invoiceTotal: input.invoiceTotal === null || input.invoiceTotal === undefined ? null : D(input.invoiceTotal),
+          createdById: user.id,
+        },
+      }),
+    );
     return this.detail(p.id);
   }
 
@@ -109,7 +119,7 @@ export class PurchaseService {
       },
     });
     if (clash) {
-      throw new ConflictException(`Invoice ${invoiceNo} from this supplier is already entered${clash.purchaseNo ? ` as ${clash.purchaseNo}` : ' as a draft'}`);
+      throw new ConflictException(`Invoice ${invoiceNo} from this supplier is already entered${clash.purchaseNo ? ` as ${clash.purchaseNo}` : ' as a draft'}${clash.status === 'DRAFT' ? ' (not posted yet)' : ''}`);
     }
   }
 
@@ -134,6 +144,13 @@ export class PurchaseService {
       const baseQty = enteredQty.mul(packSize);
       if (!p.unit.allowDecimal && !baseQty.isInteger()) throw new BadRequestException(`Line ${i + 1}: ${p.name} works out to ${baseQty.toString()} ${p.unit.code}; it must be a whole number`);
       if (l.expiry && l.expiry < input.invoiceDate) throw new BadRequestException(`Line ${i + 1}: expiry date is before the invoice date`);
+      const mrp = l.mrp ?? (p.mrp === null ? null : Number(p.mrp));
+      if (l.salePrice !== null && l.salePrice !== undefined && mrp !== null && l.salePrice > mrp) {
+        throw new BadRequestException(`Line ${i + 1}: sale price ${l.salePrice} is above the MRP ${mrp} for ${p.name}`);
+      }
+      if (l.mrp !== null && l.mrp !== undefined && (l.salePrice === null || l.salePrice === undefined) && D(p.salePrice).gt(l.mrp)) {
+        throw new BadRequestException(`Line ${i + 1}: the new MRP ${l.mrp} is below the current sale price ${D(p.salePrice).toFixed(2)}. Enter a new sale price too.`);
+      }
       return { p, l, packSize, enteredQty, baseQty, gstRate: D(l.gstRate ?? p.gstRate) };
     });
     for (const c of input.charges) {
@@ -160,6 +177,7 @@ export class PurchaseService {
       await tx.purchase.update({
         where: { id },
         data: {
+          ...(cur.purchaseNo ? {} : { purchaseNo: await nextDocNo(tx, 'GRN') }), // drafts from before GRN numbering
           supplierId: input.supplierId,
           supplierInvoiceNo: input.supplierInvoiceNo,
           invoiceDate: new Date(`${input.invoiceDate}T00:00:00Z`),
@@ -191,6 +209,8 @@ export class PurchaseService {
               landedUnitCost: totals.lines[i].landedUnitCost,
               batch: x.l.batch ?? null,
               expiry: x.l.expiry ? new Date(`${x.l.expiry}T00:00:00Z`) : null,
+              salePrice: x.l.salePrice === null || x.l.salePrice === undefined ? null : D(x.l.salePrice),
+              mrp: x.l.mrp === null || x.l.mrp === undefined ? null : D(x.l.mrp),
             })),
           },
           charges: { create: input.charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: D(c.amount), paidTo: c.paidTo ?? null, referenceNo: c.referenceNo ?? null })) },
@@ -256,13 +276,30 @@ export class PurchaseService {
             difference: t.difference === null ? null : Number(t.difference),
           });
         }
-        const purchaseNo = await nextDocNo(tx, 'PU');
+        const purchaseNo = p.purchaseNo ?? (await nextDocNo(tx, 'GRN'));
         for (let i = 0; i < p.items.length; i++) {
           await tx.purchaseItem.update({ where: { id: p.items[i].id }, data: { landedUnitCost: t.lines[i].landedUnitCost, rate: t.lines[i].rate } });
         }
         // Latest landed cost becomes the product's cost (the last line wins when one product appears twice).
         for (let i = 0; i < p.items.length; i++) {
           await tx.product.update({ where: { id: p.items[i].productId }, data: { lastCost: t.lines[i].landedUnitCost } });
+        }
+        // New sale price / MRP typed on the GRN go to the product master (last line wins), each change audited.
+        const priced = new Map<number, (typeof p.items)[number]>();
+        for (const i of p.items) if (i.salePrice !== null || i.mrp !== null) priced.set(i.productId, i);
+        for (const [productId, i] of priced) {
+          const before = await tx.product.findUniqueOrThrow({ where: { id: productId }, select: { salePrice: true, mrp: true, name: true } });
+          const salePrice = i.salePrice ?? before.salePrice;
+          const mrp = i.mrp ?? before.mrp;
+          if (mrp !== null && D(salePrice).gt(mrp)) {
+            throw new UnprocessableEntityException(`${before.name}: sale price ${D(salePrice).toFixed(2)} would be above the MRP ${D(mrp).toFixed(2)}`);
+          }
+          if (D(salePrice).eq(before.salePrice) && String(mrp ?? '') === String(before.mrp ?? '')) continue;
+          await tx.product.update({ where: { id: productId }, data: { salePrice, mrp } });
+          await this.audit.log(
+            { userId: user.id, action: 'PRICE_CHANGE', entity: 'product', entityId: productId, ip, before: { salePrice: before.salePrice, mrp: before.mrp }, after: { salePrice, mrp, via: purchaseNo } },
+            tx,
+          );
         }
         await tx.purchase.update({
           where: { id },
@@ -313,7 +350,7 @@ export class PurchaseService {
         throw new ForbiddenException('Only the person who started this draft or a manager can delete it');
       }
       await tx.purchase.delete({ where: { id } });
-      await this.audit.log({ userId: user.id, action: 'PURCHASE_DRAFT_DELETE', entity: 'purchase', entityId: id, before: { supplierInvoiceNo: cur.supplierInvoiceNo } }, tx);
+      await this.audit.log({ userId: user.id, action: 'PURCHASE_DRAFT_DELETE', entity: 'purchase', entityId: id, before: { supplierInvoiceNo: cur.supplierInvoiceNo, grnNo: cur.purchaseNo } }, tx);
     });
     return { ok: true };
   }

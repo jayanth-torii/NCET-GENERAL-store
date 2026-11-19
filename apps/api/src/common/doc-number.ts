@@ -23,8 +23,8 @@ export async function nextBillNo(tx: Tx, counterCode: string, at = new Date()): 
   return `${counterCode}/${fy}/${String(n).padStart(6, '0')}`;
 }
 
-/** Purchase, return and other document numbers such as PU/26-27/0184. */
-export async function nextDocNo(tx: Tx, prefix: 'PU' | 'SR' | 'PR', at = new Date()): Promise<string> {
+/** GRN (goods received note), return and other document numbers such as GRN/26-27/0184. */
+export async function nextDocNo(tx: Tx, prefix: 'GRN' | 'SR' | 'PR', at = new Date()): Promise<string> {
   const fy = fyCode(at);
   const n = await nextInSeries(tx, `${prefix}:${fy}`);
   return `${prefix}/${fy}/${String(n).padStart(4, '0')}`;

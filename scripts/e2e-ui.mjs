@@ -166,7 +166,9 @@ async function main() {
   await page.getByRole('button', { name: 'Unlock' }).click();
   await page.waitForSelector('text=Counter locked', { state: 'detached' });
   check(true, 'password unlocks');
-  await page.getByRole('link', { name: 'Sales register', exact: true }).click();
+  // top menu bar: Sales → Bill view
+  await page.getByRole('button', { name: 'Sales', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Bill view / return against bill' }).click();
   await page.waitForSelector(`text=${billNo.trim()}`);
   check(true, 'cashier sees own bill in register');
 
@@ -184,6 +186,9 @@ async function main() {
     ['Adjustments', '/stock?tab=adjust', 'text=New adjustment'],
     ['Reports daily', '/reports', 'text=Daily sales report'],
     ['Settings', '/admin', 'text=People who use the system'],
+    ['GST input register', '/gst?tab=input', 'text=Rate-wise summary'],
+    ['GST output register', '/gst?tab=output', 'text=Credit notes (sales returns)'],
+    ['Expiry report', '/stock?tab=expiry', 'text=Batches listed'],
   ];
   let n = 4;
   for (const [label, path, marker] of pages) {
@@ -221,25 +226,31 @@ async function main() {
   const k = await newPage();
   await login(k, s.keeper, 'Ui123456');
   await k.waitForSelector('[data-page="dashboard"]');
-  check((await k.getByRole('link', { name: 'Counter sales', exact: true }).count()) === 0, 'store keeper has no Counter sales link');
-  await k.goto(`${BASE}/purchases`);
-  await k.getByRole('button', { name: 'New purchase' }).click();
+  check((await k.getByRole('button', { name: 'Sales', exact: true }).count()) === 0 && (await k.getByRole('button', { name: 'GST', exact: true }).count()) === 0, 'store keeper has no Sales or GST menu');
+  // Purchase → Purchase entry (new GRN) from the top menu
+  await k.getByRole('button', { name: 'Purchase', exact: true }).click();
+  await k.getByRole('menuitem', { name: 'Purchase entry (new GRN)' }).click();
+  await k.getByRole('dialog').waitFor();
+  check(true, 'Purchase menu opens a new GRN');
   check((await k.getByLabel('Or add a new supplier').count()) === 0, 'store keeper cannot add a supplier (manager only)');
-  await k.getByRole('dialog').getByLabel('Supplier').selectOption({ label: s.supplierName });
+  await k.getByRole('dialog').getByLabel('Supplier', { exact: true }).selectOption({ label: s.supplierName });
   await k.getByLabel('Invoice / DC no').fill(`UI-${T}`);
+  await k.getByLabel('Invoice amount ₹ (grand total on the supplier bill)').fill('300');
   await k.getByRole('button', { name: 'Start entering items' }).click();
-  await k.waitForSelector('text=Draft purchase');
+  await k.waitForSelector('text=draft purchase');
+  check(/^GRN\/\d{2}-\d{2}\/\d{4}/.test(await k.locator('h1').first().innerText()), 'GRN number shown as soon as the bill is saved');
   await k.getByLabel('Add item').fill(s.product.code);
   await k.getByLabel('Add item').press('Enter');
   await k.getByLabel('Quantity').fill('10');
   await k.getByLabel('Rate', { exact: true }).fill('25');
   await k.getByRole('button', { name: 'Add charge' }).click();
   await k.getByLabel('Charge amount').fill('20');
-  await k.getByLabel('Grand total printed on the supplier bill').fill('300');
+  await k.getByLabel('Sale price').fill('34');
+  await k.getByLabel('Expiry').fill('2030-12-31');
   await k.waitForSelector('text=Difference');
   check((await k.getByRole('button', { name: 'Post to stock' }).count()) === 0, 'store keeper has no "Post to stock" button');
   check(await k.getByRole('button', { name: 'Mark ready for manager' }).isDisabled(), '"Mark ready" is blocked while totals differ by more than ₹1');
-  await k.getByLabel('Grand total printed on the supplier bill').fill('270.50');
+  await k.getByLabel('Invoice amount ₹', { exact: true }).fill('270.50');
   await k.waitForSelector('text=Matches the supplier bill');
   await k.screenshot({ path: join(SHOTS, `${String(n++).padStart(2, '0')}-purchase-draft.png`), fullPage: true });
   await k.getByRole('button', { name: 'Mark ready for manager' }).click();

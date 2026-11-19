@@ -425,7 +425,7 @@ export function Billing() {
   const canDiscount = isManager || maxPct > 0;
 
   return (
-    <div className="grid min-h-[calc(100vh-5rem)] gap-3 xl:grid-cols-[minmax(0,1fr)_380px]">
+    <div className="grid min-h-[calc(100vh-7.5rem)] gap-3 xl:grid-cols-[minmax(0,1fr)_380px]">
       {/* Left: search + lines */}
       <div className="flex min-w-0 flex-col gap-3">
         {editId && (
@@ -605,7 +605,7 @@ export function Billing() {
                   </button>
                 ))
               ) : (
-                <p className="col-span-full text-sm text-ink-mute">No section kits yet. A manager can add them under Settings &amp; users → Kits.</p>
+                <p className="col-span-full text-sm text-ink-mute">No section kits yet. A manager can add them under Masters → Section kits.</p>
               ))}
           </div>
         </div>

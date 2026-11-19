@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { Response } from 'express';
 import { SessionUser } from '../auth/auth.decorators';
 import { SettingsService } from '../common/settings.service';
-import { fmtDate, fmtDateTime, fyRange, istMonthRange, istRange } from '../common/time';
+import { fmtDate, fmtDateTime, fyRange, istDate, istMonthRange, istRange } from '../common/time';
 import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
 import { reportToPdf } from './render-pdf';
@@ -541,6 +541,238 @@ export class ReportsService {
           title: 'Returns to suppliers',
           columns: [{ key: 'returnNo', label: 'Return no' }, { key: 'date', label: 'Date' }, { key: 'supplier', label: 'Supplier' }, { key: 'against', label: 'Against' }, { key: 'reason', label: 'Reason' }, { key: 'total', label: 'Amount', type: 'money' }],
           rows: returns.map((x) => ({ returnNo: x.returnNo, date: fmtDate(x.createdAt), supplier: x.supplier.name, against: x.purchase.purchaseNo, reason: x.reason, total: n(x.total) })),
+        },
+      ],
+    };
+  }
+
+  // ---------------- Expiry (inventory) ----------------
+
+  /** Batches received on posted GRNs that expire within `days` (or have already expired). */
+  async expiry(days: number, inStockOnly: boolean, user: SessionUser): Promise<Report> {
+    const today = istDate();
+    const limit = new Date(`${today}T00:00:00Z`);
+    limit.setUTCDate(limit.getUTCDate() + days);
+    const rows = await this.prisma.$queryRaw<
+      { code: string; name: string; unit: string; batch: string | null; expiry: Date; qty: Prisma.Decimal; grn: string | null; supplier: string; on_hand: Prisma.Decimal; product_id: number }[]
+    >`
+      SELECT p.id AS product_id, p.code, p.name, u.code AS unit, pi.batch, pi.expiry, pi.base_qty - coalesce(r.ret, 0) AS qty,
+             pu.purchase_no AS grn, s.name AS supplier, coalesce(ps.on_hand, 0) AS on_hand
+      FROM purchase_item pi
+      JOIN purchase pu ON pu.id = pi.purchase_id AND pu.status = 'POSTED'
+      JOIN product p ON p.id = pi.product_id
+      JOIN unit u ON u.id = p.unit_id
+      JOIN supplier s ON s.id = pu.supplier_id
+      LEFT JOIN product_stock ps ON ps.product_id = p.id
+      LEFT JOIN (SELECT purchase_item_id, sum(base_qty) AS ret FROM purchase_return_item GROUP BY 1) r ON r.purchase_item_id = pi.id
+      WHERE pi.expiry IS NOT NULL AND pi.expiry <= ${limit}::date
+        ${inStockOnly ? Prisma.sql`AND coalesce(ps.on_hand, 0) > 0` : Prisma.empty}
+      ORDER BY pi.expiry, p.name`;
+    const t0 = Date.parse(`${today}T00:00:00Z`);
+    const out = rows.map((x) => {
+      const left = Math.round((x.expiry.getTime() - t0) / 86_400_000);
+      return {
+        productId: x.product_id, code: x.code, name: x.name, batch: x.batch ?? '', expiry: fmtDate(x.expiry.toISOString().slice(0, 10)),
+        daysLeft: left, status: left < 0 ? 'EXPIRED' : left <= 30 ? 'Within 30 days' : `Within ${days} days`,
+        received: n(x.qty), onHand: n(x.on_hand), unit: x.unit, grn: x.grn ?? '', supplier: x.supplier,
+      };
+    });
+    const expired = out.filter((x) => x.daysLeft < 0);
+    return {
+      title: 'Expiry report',
+      subtitle: `Expired, or expiring within ${days} days of ${fmtDate(today)}${inStockOnly ? ' · items in stock only' : ''}`,
+      fileName: `expiry_${today}_${days}d`,
+      ...this.meta(user),
+      landscape: true,
+      summary: [
+        { label: 'Batches listed', value: out.length, type: 'int' },
+        { label: 'Already expired', value: expired.length, type: 'int' },
+        { label: 'Expiring in 30 days', value: out.filter((x) => x.daysLeft >= 0 && x.daysLeft <= 30).length, type: 'int' },
+      ],
+      sections: [
+        {
+          columns: [
+            { key: 'expiry', label: 'Expiry' }, { key: 'daysLeft', label: 'Days left', type: 'int' }, { key: 'status', label: 'Status' },
+            { key: 'code', label: 'Code' }, { key: 'name', label: 'Item' }, { key: 'batch', label: 'Batch' },
+            { key: 'received', label: 'Received', type: 'qty' }, { key: 'onHand', label: 'Stock now', type: 'qty' }, { key: 'unit', label: 'Unit' },
+            { key: 'grn', label: 'GRN no' }, { key: 'supplier', label: 'Supplier' },
+          ],
+          rows: out,
+          note: 'Expiry dates come from the batch / expiry entered on each GRN line. "Stock now" is the item\'s total stock, across all batches. Remove expired goods with a stock adjustment (reason: expired).',
+        },
+      ],
+    };
+  }
+
+  // ---------------- GST registers ----------------
+
+  private static splitTax(tax: number, interState: boolean) {
+    const t = Math.round(tax * 100) / 100;
+    if (interState) return { cgst: 0, sgst: 0, igst: t };
+    const cgst = Math.round((t / 2) * 100) / 100;
+    return { cgst, sgst: Math.round((t - cgst) * 100) / 100, igst: 0 };
+  }
+
+  private static rateSummary(rows: { rate: string; taxable: number; cgst: number; sgst: number; igst: number; tax: number; total: number }[]) {
+    const m = new Map<string, { rate: string; taxable: number; cgst: number; sgst: number; igst: number; tax: number; total: number }>();
+    for (const r of rows) {
+      const c = m.get(r.rate) ?? { rate: r.rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0, total: 0 };
+      for (const k of ['taxable', 'cgst', 'sgst', 'igst', 'tax', 'total'] as const) c[k] = Math.round((c[k] + r[k]) * 100) / 100;
+      m.set(r.rate, c);
+    }
+    return [...m.values()].sort((a, b) => parseFloat(a.rate) - parseFloat(b.rate));
+  }
+
+  private static gstCols(first: ReportColumn[]): ReportColumn[] {
+    return [
+      ...first,
+      { key: 'rate', label: 'GST %' }, { key: 'taxable', label: 'Taxable', type: 'money' }, { key: 'cgst', label: 'CGST', type: 'money' },
+      { key: 'sgst', label: 'SGST', type: 'money' }, { key: 'igst', label: 'IGST', type: 'money' }, { key: 'tax', label: 'Total tax', type: 'money' }, { key: 'total', label: 'Value', type: 'money' },
+    ];
+  }
+
+  private static sumGst<T extends { taxable: number; cgst: number; sgst: number; igst: number; tax: number; total: number }>(rows: T[]) {
+    const s = (k: 'taxable' | 'cgst' | 'sgst' | 'igst' | 'tax' | 'total') => Math.round(rows.reduce((a, r) => a + r[k], 0) * 100) / 100;
+    return { taxable: s('taxable'), cgst: s('cgst'), sgst: s('sgst'), igst: s('igst'), tax: s('tax'), total: s('total') };
+  }
+
+  /** GST input register: tax paid on posted GRNs by supplier invoice date, less debit notes (returns to suppliers). */
+  async gstInput(from: string, to: string, user: SessionUser): Promise<Report> {
+    const settings = await this.settings.get();
+    const storeState = settings.gstin?.slice(0, 2) ?? null;
+    const lines = await this.prisma.$queryRaw<
+      { grn: string; invoice_date: Date; invoice_no: string; supplier: string; gstin: string | null; rate: Prisma.Decimal; taxable: Prisma.Decimal; tax: Prisma.Decimal }[]
+    >`
+      SELECT pu.purchase_no AS grn, pu.invoice_date, pu.supplier_invoice_no AS invoice_no, s.name AS supplier, s.gstin, pi.gst_rate AS rate,
+             sum(pi.line_total - pi.tax_amount) AS taxable, sum(pi.tax_amount) AS tax
+      FROM purchase_item pi JOIN purchase pu ON pu.id = pi.purchase_id JOIN supplier s ON s.id = pu.supplier_id
+      WHERE pu.status = 'POSTED' AND pu.invoice_date >= ${from}::date AND pu.invoice_date <= ${to}::date
+      GROUP BY pu.id, s.id, pi.gst_rate
+      ORDER BY pu.invoice_date, pu.purchase_no, pi.gst_rate`;
+    const inter = (gstin: string | null) => !!(storeState && gstin && gstin.slice(0, 2) !== storeState);
+    const rows = lines.map((x) => {
+      const taxable = n(x.taxable);
+      const tax = n(x.tax);
+      return {
+        grn: x.grn, date: fmtDate(x.invoice_date.toISOString().slice(0, 10)), invoiceNo: x.invoice_no, supplier: x.supplier, gstin: x.gstin ?? 'Unregistered',
+        rate: `${n(x.rate)}%`, taxable, ...ReportsService.splitTax(tax, inter(x.gstin)), tax, total: Math.round((taxable + tax) * 100) / 100,
+      };
+    });
+    const r = istRange(from, to);
+    const ret = await this.prisma.$queryRaw<
+      { return_no: string; created_at: Date; grn: string | null; supplier: string; gstin: string | null; rate: Prisma.Decimal; amount: Prisma.Decimal; tax: Prisma.Decimal }[]
+    >`
+      SELECT pr.return_no, pr.created_at, pu.purchase_no AS grn, s.name AS supplier, s.gstin, pi.gst_rate AS rate,
+             sum(ri.amount) AS amount, sum(CASE WHEN pi.line_total = 0 THEN 0 ELSE round(ri.amount * pi.tax_amount / pi.line_total, 2) END) AS tax
+      FROM purchase_return_item ri JOIN purchase_return pr ON pr.id = ri.return_id JOIN purchase_item pi ON pi.id = ri.purchase_item_id
+      JOIN purchase pu ON pu.id = pr.purchase_id JOIN supplier s ON s.id = pr.supplier_id
+      WHERE pr.created_at >= ${r.start} AND pr.created_at < ${r.end}
+      GROUP BY pr.id, pu.id, s.id, pi.gst_rate ORDER BY pr.created_at, pi.gst_rate`;
+    const retRows = ret.map((x) => {
+      const tax = n(x.tax);
+      const total = n(x.amount);
+      return {
+        returnNo: x.return_no, date: fmtDate(x.created_at), grn: x.grn ?? '', supplier: x.supplier, rate: `${n(x.rate)}%`,
+        taxable: Math.round((total - tax) * 100) / 100, ...ReportsService.splitTax(tax, inter(x.gstin)), tax, total,
+      };
+    });
+    const tIn = ReportsService.sumGst(rows);
+    const tRet = ReportsService.sumGst(retRows);
+    return {
+      title: 'GST input register',
+      subtitle: `Purchases by supplier invoice date, ${fmtDate(from)} to ${fmtDate(to)}`,
+      fileName: `gst_input_register_${from}_to_${to}`,
+      ...this.meta(user),
+      landscape: true,
+      summary: [
+        { label: 'Taxable purchases', value: tIn.taxable, type: 'money' },
+        { label: 'Input tax (GST paid)', value: tIn.tax, type: 'money' },
+        { label: 'Less: debit notes', value: tRet.tax, type: 'money' },
+        { label: 'Net input tax', value: Math.round((tIn.tax - tRet.tax) * 100) / 100, type: 'money' },
+      ],
+      sections: [
+        {
+          title: 'Purchase invoices',
+          columns: ReportsService.gstCols([{ key: 'grn', label: 'GRN no' }, { key: 'date', label: 'Inv. date' }, { key: 'invoiceNo', label: 'Invoice no' }, { key: 'supplier', label: 'Supplier' }, { key: 'gstin', label: 'Supplier GSTIN' }]),
+          rows,
+          totals: { grn: 'Total', ...tIn },
+          note:
+            (settings.gstMode === 'REGISTERED' ? '' : 'The store is set as not GST registered, so this input tax cannot be claimed and is part of item cost. ') +
+            'Freight and other bill charges are not included. IGST is used when the supplier GSTIN is from another state than the store GSTIN.',
+        },
+        { title: 'Rate-wise summary', columns: ReportsService.gstCols([]), rows: ReportsService.rateSummary(rows), totals: { rate: 'Total', ...tIn } },
+        {
+          title: 'Debit notes (returns to suppliers)',
+          columns: ReportsService.gstCols([{ key: 'returnNo', label: 'Return no' }, { key: 'date', label: 'Date' }, { key: 'grn', label: 'Against GRN' }, { key: 'supplier', label: 'Supplier' }]),
+          rows: retRows,
+          totals: { returnNo: 'Total', ...tRet },
+        },
+      ],
+    };
+  }
+
+  /** GST output register: tax collected on completed bills, less credit notes (sales returns). */
+  async gstOutput(from: string, to: string, user: SessionUser): Promise<Report> {
+    const settings = await this.settings.get();
+    const r = istRange(from, to);
+    const lines = await this.prisma.$queryRaw<
+      { bill_no: string; billed_at: Date; customer: string | null; rate: string; total: Prisma.Decimal; tax: Prisma.Decimal }[]
+    >`
+      SELECT s.bill_no, s.billed_at, s.customer_name AS customer,
+             CASE WHEN si.kit_id IS NOT NULL THEN 'Kit (mixed)' ELSE trim(to_char(si.gst_rate, 'FM990.99'), '.') || '%' END AS rate,
+             sum(si.line_total) AS total, sum(si.tax_amount) AS tax
+      FROM sale_item si JOIN sale s ON s.id = si.sale_id
+      WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end}
+      GROUP BY s.id, 4 ORDER BY s.billed_at, 4`;
+    const rows = lines.map((x) => {
+      const total = n(x.total);
+      const tax = n(x.tax);
+      return { billNo: x.bill_no, date: fmtDate(x.billed_at), customer: x.customer ?? '', rate: x.rate, taxable: Math.round((total - tax) * 100) / 100, ...ReportsService.splitTax(tax, false), tax, total };
+    });
+    const ret = await this.prisma.$queryRaw<
+      { return_no: string; created_at: Date; bill_no: string; rate: string; amount: Prisma.Decimal; tax: Prisma.Decimal }[]
+    >`
+      SELECT sr.return_no, sr.created_at, s.bill_no,
+             CASE WHEN si.kit_id IS NOT NULL THEN 'Kit (mixed)' ELSE trim(to_char(si.gst_rate, 'FM990.99'), '.') || '%' END AS rate,
+             sum(ri.amount) AS amount, sum(CASE WHEN si.line_total = 0 THEN 0 ELSE round(ri.amount * si.tax_amount / si.line_total, 2) END) AS tax
+      FROM sales_return_item ri JOIN sales_return sr ON sr.id = ri.return_id JOIN sale_item si ON si.id = ri.sale_item_id JOIN sale s ON s.id = sr.sale_id
+      WHERE sr.created_at >= ${r.start} AND sr.created_at < ${r.end}
+      GROUP BY sr.id, s.id, 4 ORDER BY sr.created_at, 4`;
+    const retRows = ret.map((x) => {
+      const total = n(x.amount);
+      const tax = n(x.tax);
+      return { returnNo: x.return_no, date: fmtDate(x.created_at), billNo: x.bill_no, rate: x.rate, taxable: Math.round((total - tax) * 100) / 100, ...ReportsService.splitTax(tax, false), tax, total };
+    });
+    const tOut = ReportsService.sumGst(rows);
+    const tRet = ReportsService.sumGst(retRows);
+    return {
+      title: 'GST output register',
+      subtitle: `Sales bills, ${fmtDate(from)} to ${fmtDate(to)}`,
+      fileName: `gst_output_register_${from}_to_${to}`,
+      ...this.meta(user),
+      landscape: true,
+      summary: [
+        { label: 'Taxable sales', value: tOut.taxable, type: 'money' },
+        { label: 'Output tax (GST collected)', value: tOut.tax, type: 'money' },
+        { label: 'Less: credit notes', value: tRet.tax, type: 'money' },
+        { label: 'Net output tax', value: Math.round((tOut.tax - tRet.tax) * 100) / 100, type: 'money' },
+      ],
+      sections: [
+        {
+          title: 'Sales bills',
+          columns: ReportsService.gstCols([{ key: 'billNo', label: 'Bill no' }, { key: 'date', label: 'Date' }, { key: 'customer', label: 'Customer / section' }]),
+          rows,
+          totals: { billNo: 'Total', ...tOut },
+          note:
+            (settings.gstMode === 'REGISTERED' ? '' : 'The store is set as not GST registered, so bills carry no GST and the tax columns are zero. The admin can change this in Utilities → Store settings. ') +
+            'Prices include GST. Counter sales are within the state, so tax is split equally into CGST and SGST. Kit lines carry the tax of their contents. Bill round-off is not taxed.',
+        },
+        { title: 'Rate-wise summary', columns: ReportsService.gstCols([]), rows: ReportsService.rateSummary(rows), totals: { rate: 'Total', ...tOut } },
+        {
+          title: 'Credit notes (sales returns)',
+          columns: ReportsService.gstCols([{ key: 'returnNo', label: 'Return no' }, { key: 'date', label: 'Date' }, { key: 'billNo', label: 'Against bill' }]),
+          rows: retRows,
+          totals: { returnNo: 'Total', ...tRet },
         },
       ],
     };

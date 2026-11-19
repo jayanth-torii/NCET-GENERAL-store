@@ -1,4 +1,4 @@
-import { Controller, ForbiddenException, Get, Query, Res } from '@nestjs/common';
+import { BadRequestException, Controller, ForbiddenException, Get, Query, Res } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Response } from 'express';
 import { z } from 'zod';
@@ -113,6 +113,38 @@ export class ReportsController {
   async low(@Query() q: unknown, @CurrentUser() user: SessionUser, @Res() res: Response) {
     const p = parse(z.object({ format: zFormat }), q);
     return this.reports.send(res, await this.reports.lowStock(user), p.format);
+  }
+
+  @Roles(...R.STOCK_VIEW)
+  @Get('stock/expiry')
+  async expiry(@Query() q: unknown, @CurrentUser() user: SessionUser, @Res() res: Response) {
+    const p = parse(
+      z.object({
+        days: z.coerce.number().int().min(0).max(730).default(90),
+        inStock: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+        format: zFormat,
+      }),
+      q,
+    );
+    return this.reports.send(res, await this.reports.expiry(p.days, p.inStock, user), p.format);
+  }
+
+  /** GST input register: tax on purchases (GRNs) less debit notes. */
+  @Roles(...R.MANAGE)
+  @Get('gst/input')
+  async gstInput(@Query() q: unknown, @CurrentUser() user: SessionUser, @Res() res: Response) {
+    const p = parse(RangeQ, q);
+    if (p.from > p.to) throw new BadRequestException('The start date is after the end date');
+    return this.reports.send(res, await this.reports.gstInput(p.from, p.to, user), p.format);
+  }
+
+  /** GST output register: tax on sales bills less credit notes. */
+  @Roles(...R.MANAGE)
+  @Get('gst/output')
+  async gstOutput(@Query() q: unknown, @CurrentUser() user: SessionUser, @Res() res: Response) {
+    const p = parse(RangeQ, q);
+    if (p.from > p.to) throw new BadRequestException('The start date is after the end date');
+    return this.reports.send(res, await this.reports.gstOutput(p.from, p.to, user), p.format);
   }
 
   @Roles(...R.STOCK_VIEW)

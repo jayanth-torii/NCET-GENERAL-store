@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { download, get, qs } from '../lib/api';
 import { MANAGE, PURCHASE, useAuth } from '../lib/auth';
 import { useKits } from '../lib/catalogue';
@@ -57,7 +58,7 @@ function SectionKits({ from, to, today, setFrom, setTo }: { from: string; to: st
               Download order sheet (PDF)
             </Button>
           </div>
-          {kits.data && active.length === 0 && <p className="text-sm text-amber-700">No active kits yet. Create one in Settings &amp; users → Section kits.</p>}
+          {kits.data && active.length === 0 && <p className="text-sm text-amber-700">No active kits yet. Create one in Masters → Section kits.</p>}
           <ErrorBox error={err} />
         </div>
       </Card>
@@ -102,7 +103,10 @@ export function Reports() {
         ]
       : []),
   ];
-  const [tab, setTab] = useState<Tab>(tabs[0]?.value ?? 'daily');
+  const [params, setParams] = useSearchParams();
+  const asked = params.get('tab') as Tab | null;
+  const tab: Tab = asked && tabs.some((t) => t.value === asked) ? asked : tabs[0]?.value ?? 'daily';
+  const setTab = (t: Tab) => setParams({ tab: t });
   const [day, setDay] = useState(today);
   const [month, setMonth] = useState(today.slice(0, 7));
   const [from, setFrom] = useState(monthStartIso(today));

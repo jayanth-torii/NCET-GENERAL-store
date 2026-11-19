@@ -49,7 +49,7 @@ export function UpiQrDialog({ open, amount, note, settings, requireRef, onClose,
       }
     >
       {!upiId ? (
-        <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-700">The store's UPI ID is not set. An admin can add it under Settings &amp; users → Store settings.</p>
+        <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-700">The store's UPI ID is not set. An admin can add it under Utilities → Store settings.</p>
       ) : (
         <div className="grid gap-4 sm:grid-cols-[auto_1fr]">
           <div className="flex flex-col items-center gap-2">

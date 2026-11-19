@@ -8,6 +8,7 @@ import { Admin } from './pages/Admin';
 import { Billing } from './pages/Billing';
 import { ChangePassword } from './pages/ChangePassword';
 import { Dashboard } from './pages/Dashboard';
+import { Gst } from './pages/Gst';
 import { Login } from './pages/Login';
 import { Products } from './pages/Products';
 import { PurchaseEditor } from './pages/PurchaseEditor';
@@ -34,6 +35,7 @@ export function App() {
         <Route path="products" element={<RequireRole roles={PURCHASE}><Products /></RequireRole>} />
         <Route path="stock" element={<RequireRole roles={PURCHASE}><Stock /></RequireRole>} />
         <Route path="reports" element={<Reports />} />
+        <Route path="gst" element={<RequireRole roles={MANAGE}><Gst /></RequireRole>} />
         <Route path="admin" element={<RequireRole roles={MANAGE}><Admin /></RequireRole>} />
         <Route path="account" element={<ChangePassword />} />
         <Route path="*" element={<Navigate to="/" replace />} />

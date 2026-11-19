@@ -382,7 +382,7 @@ export function Dashboard() {
   const [err, setErr] = useState<unknown>(null);
 
   const shell = (children: ReactNode) => (
-    <div className={cx('-m-4 min-h-[calc(100vh-3.5rem)] p-4 text-white sm:-m-6 sm:p-6', PAGE)} data-page="dashboard">
+    <div className={cx('-m-4 min-h-[calc(100vh-6rem)] p-4 text-white sm:-m-6 sm:p-6', PAGE)} data-page="dashboard">
       <div className="mx-auto max-w-7xl">{children}</div>
     </div>
   );

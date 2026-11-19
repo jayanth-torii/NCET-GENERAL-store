@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, get, patch, post, put, qs } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { useCatalogue } from '../lib/catalogue';
@@ -28,10 +29,14 @@ export function Admin() {
     { value: 'sessions', label: 'Who is logged in' },
     { value: 'audit', label: 'Audit log' },
   ];
-  const [tab, setTab] = useState<Tab>('users');
+  // The tab lives in the URL (?tab=counters) so the top menu can open any of them directly.
+  const [params, setParams] = useSearchParams();
+  const asked = params.get('tab') as Tab | null;
+  const tab: Tab = asked && tabs.some((t) => t.value === asked) ? asked : 'users';
+  const setTab = (t: Tab) => setParams({ tab: t });
   return (
     <div>
-      <PageHeader title="Settings & users" subtitle={isAdmin ? 'Everything here is recorded in the audit log.' : 'Managers can manage kits, suppliers and categories. Ask the admin for users and settings.'} />
+      <PageHeader title="Masters & utilities" subtitle={isAdmin ? 'Everything here is recorded in the audit log.' : 'Managers can manage kits, suppliers and categories. Ask the admin for users and settings.'} />
       <Tabs value={tab} onChange={setTab} tabs={tabs} />
       {tab === 'users' && <Users isAdmin={isAdmin} />}
       {tab === 'counters' && <Counters />}

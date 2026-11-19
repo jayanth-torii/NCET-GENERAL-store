@@ -9,22 +9,59 @@ import type { Category, CatalogueItem } from '../lib/types';
 import { ReportView } from '../components/ReportView';
 import { Badge, Button, Card, Checkbox, ConfirmDialog, cx, Empty, ErrorBox, Field, Input, Loading, num, PageHeader, Select, Table, Tabs, td, th, useToast } from '../components/ui';
 
-type Tab = 'summary' | 'low' | 'adjust' | 'ledger';
+type Tab = 'summary' | 'low' | 'expiry' | 'adjust' | 'ledger';
+const TABS: Tab[] = ['summary', 'low', 'expiry', 'adjust', 'ledger'];
+
+/** Batches with an expiry date entered on a GRN, expired or expiring within the chosen window. */
+function Expiry() {
+  const [days, setDays] = useState('90');
+  const [inStock, setInStock] = useState(true);
+  return (
+    <>
+      <div className="mb-4 flex flex-wrap items-end gap-4">
+        <Field label="Expiring within" className="w-48">
+          {(id) => (
+            <Select id={id} value={days} onChange={(e) => setDays(e.target.value)}>
+              {[
+                ['0', 'Already expired'],
+                ['30', '30 days'],
+                ['60', '60 days'],
+                ['90', '90 days'],
+                ['180', '180 days'],
+                ['365', '1 year'],
+              ].map(([v, l]) => (
+                <option key={v} value={v}>
+                  {l}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        <div className="pb-2">
+          <Checkbox label="Items in stock only" checked={inStock} onChange={setInStock} />
+        </div>
+      </div>
+      <ReportView path={`/reports/stock/expiry${qs({ days, inStock: inStock ? 'true' : 'false' })}`} />
+    </>
+  );
+}
 
 export function Stock() {
   const [params, setParams] = useSearchParams();
-  const tab = (params.get('tab') as Tab) || 'summary';
+  const asked = params.get('tab') as Tab | null;
+  const tab: Tab = asked && TABS.includes(asked) ? asked : 'summary';
   const setTab = (t: Tab) => setParams({ tab: t });
   const [ledgerFor, setLedgerFor] = useState<number | null>(null);
   return (
     <div>
-      <PageHeader title="Stock" subtitle="Live stock from the movement ledger. Closing = Opening + Purchased − Sold + Sales returns − Purchase returns ± Adjustments." />
+      <PageHeader title="Inventory" subtitle="Live stock from the movement ledger. Closing = Opening + Purchased − Sold + Sales returns − Purchase returns ± Adjustments." />
       <Tabs
         value={tab}
         onChange={setTab}
         tabs={[
           { value: 'summary', label: 'Stock summary' },
           { value: 'low', label: 'Low & negative' },
+          { value: 'expiry', label: 'Expiry' },
           { value: 'adjust', label: 'Adjustments' },
           { value: 'ledger', label: 'Item ledger' },
         ]}
@@ -38,6 +75,7 @@ export function Stock() {
         />
       )}
       {tab === 'low' && <ReportView path="/reports/stock/low" formats={['pdf', 'xlsx']} />}
+      {tab === 'expiry' && <Expiry />}
       {tab === 'adjust' && <Adjustments />}
       {tab === 'ledger' && <Ledger initial={ledgerFor} />}
     </div>

@@ -89,6 +89,8 @@ async function main() {
   const invNo = `INV-${T}`;
   const draft = await keeper.client.post('/purchases', { supplierId: sup.data.id, supplierInvoiceNo: invNo, invoiceDate: today, taxInclusive: true });
   check(draft.status === 201 && draft.data.status === 'DRAFT', 'draft purchase created');
+  check(/^GRN\/\d{2}-\d{2}\/\d{4}$/.test(draft.data.purchaseNo ?? ''), 'GRN number given when the bill is first saved', draft.data.purchaseNo);
+  const grnNo = draft.data.purchaseNo;
   const P = draft.data.id;
   const body = (invoiceTotal) => ({
     supplierId: sup.data.id, supplierInvoiceNo: invNo, invoiceDate: today, taxInclusive: true,
@@ -112,7 +114,7 @@ async function main() {
   const ready2 = await keeper.client.post(`/purchases/${P}/ready`);
   check(ready2.status === 200 && ready2.data.readyAt, 'store keeper marks the matching bill ready', ready2.data.readyAt);
   const post2 = await mgr.client.post(`/purchases/${P}/post`);
-  check(post2.status === 200 && post2.data.status === 'POSTED' && /^PU\//.test(post2.data.purchaseNo), 'manager posts within Rs 1', post2.data);
+  check(post2.status === 200 && post2.data.status === 'POSTED' && post2.data.purchaseNo === grnNo, 'manager posts within Rs 1; GRN number unchanged', post2.data.purchaseNo);
   check(post2.data.roundOff === 0.6 && post2.data.grandTotal === 3420.6, 'round-off recorded', { r: post2.data.roundOff, g: post2.data.grandTotal });
   const itA = post2.data.items.find((i) => i.productId === A);
   const itB = post2.data.items.find((i) => i.productId === B);
@@ -292,6 +294,52 @@ async function main() {
   check(actions && actions.rows.some((r) => r.action === 'PRICE_OVERRIDE') && actions.rows.some((r) => r.action === 'RECEIPT_REPRINT'), 'daily report lists price overrides and reprints for the manager');
   const upiRows = dailyM.sections.find((s) => s.title === 'UPI and card transactions').rows;
   check(upiRows.some((r) => r.reference === UTR), 'daily report lists the UPI transaction ID for reconciliation');
+
+  console.log('\nGRN sale price, expiry, GST registers');
+  const settingsBefore = (await admin.get('/settings')).data;
+  const regd = { storeName: settingsBefore.storeName, addressLine: settingsBefore.addressLine, phone: null, gstin: '36AABCN1234F1Z5', gstMode: 'REGISTERED', receiptFooter: settingsBefore.receiptFooter, blockNegativeStock: false, roundBillToRupee: true, maxCashierDiscount: 0 };
+  check((await admin.put('/settings', regd)).status === 200, 'store set as GST registered for the GST checks');
+  const pC = await keeper.client.post('/products', { name: `GEL PEN GST ${T}`, categoryId: stationery, unitId: PCS, salePrice: 20, mrp: 25, gstRate: 18 });
+  check(pC.status === 201, 'product with 18% GST');
+  const C = pC.data.id;
+  const sup2 = await mgr.client.post('/suppliers', { name: `Karnataka Pens ${T}`, gstin: '29ABCDE1234F1Z5' });
+  const g = await keeper.client.post('/purchases', { supplierId: sup2.data.id, supplierInvoiceNo: `GST-${T}`, invoiceDate: today, taxInclusive: false, invoiceTotal: 1180 });
+  check(g.status === 201 && g.data.invoiceTotal === 1180 && /^GRN\//.test(g.data.purchaseNo), 'invoice amount taken when the GRN is created', g.data);
+  const expDate = new Date(Date.parse(`${today}T00:00:00Z`) + 20 * 86_400_000).toISOString().slice(0, 10);
+  const gl = (line) => ({ supplierId: sup2.data.id, supplierInvoiceNo: `GST-${T}`, invoiceDate: today, taxInclusive: false, billDiscount: 0, charges: [], invoiceTotal: 1180, lines: [{ productId: C, entryUnit: 'BASE', enteredQty: 100, rate: 10, gstRate: 18, ...line }] });
+  const overM = await keeper.client.put(`/purchases/${g.data.id}`, gl({ salePrice: 30 }));
+  check(overM.status === 400 && /above the MRP/.test(overM.data.message), 'GRN sale price above MRP refused', overM.data);
+  const lowM = await keeper.client.put(`/purchases/${g.data.id}`, gl({ mrp: 15 }));
+  check(lowM.status === 400 && /below the current sale price/.test(lowM.data.message), 'new MRP below the current price refused', lowM.data);
+  const gs = await keeper.client.put(`/purchases/${g.data.id}`, gl({ salePrice: 22, mrp: 28, batch: 'B1', expiry: expDate }));
+  check(gs.status === 200 && gs.data.items[0].salePrice === 22 && gs.data.items[0].mrp === 28 && gs.data.computed.computedTotal === 1180, 'GRN saves sale price, MRP, batch and expiry', gs.data.items?.[0]);
+  check((await admin.get(`/products/${C}`)).data.salePrice === 20, 'price not changed until the GRN is posted');
+  const gp = await mgr.client.post(`/purchases/${g.data.id}/post`);
+  check(gp.status === 200 && gp.data.purchaseNo === g.data.purchaseNo, 'GRN posted with its number unchanged', gp.data);
+  const cNow = (await admin.get(`/products/${C}`)).data;
+  check(cNow.salePrice === 22 && cNow.mrp === 28 && cNow.onHand === 100, 'posting applies the new sale price and MRP', { p: cNow.salePrice, m: cNow.mrp, s: cNow.onHand });
+  const exp = await keeper.client.get('/reports/stock/expiry?days=30');
+  const expRow = exp.data.sections?.[0].rows.find((r) => r.productId === C);
+  check(exp.status === 200 && expRow?.batch === 'B1' && expRow.daysLeft === 20 && expRow.grn === g.data.purchaseNo, 'expiry report lists the batch with days left', expRow);
+  check(!(await keeper.client.get('/reports/stock/expiry?days=10')).data.sections[0].rows.some((r) => r.productId === C), 'expiry window filters by days');
+  const gin = await mgr.client.get(`/reports/gst/input?from=${today}&to=${today}`);
+  const ginRow = gin.data.sections?.[0].rows.find((r) => r.grn === g.data.purchaseNo);
+  check(gin.status === 200 && ginRow?.taxable === 1000 && ginRow.tax === 180 && ginRow.igst === 180 && ginRow.cgst === 0 && ginRow.rate === '18%', 'GST input register: other-state supplier is IGST 180 on 1000', ginRow);
+  const inA = gin.data.sections[0].rows.find((r) => r.grn === grnNo);
+  check(!!inA && inA.gstin === 'Unregistered', 'input register also lists the earlier GRN (supplier without GSTIN)', inA);
+  const gsale = await cashier.client.post('/sales', { items: [{ productId: C, qty: 1 }], payments: [{ mode: 'CASH', amount: 22 }] }, { 'Idempotency-Key': uuid() });
+  check(gsale.status === 201 && gsale.data.grandTotal === 22, 'bill at the new GRN price', gsale.data);
+  const gout = await mgr.client.get(`/reports/gst/output?from=${today}&to=${today}`);
+  const goutRow = gout.data.sections?.[0].rows.find((r) => r.billNo === gsale.data.billNo);
+  check(gout.status === 200 && goutRow?.rate === '18%' && goutRow.tax === 3.36 && goutRow.cgst === 1.68 && goutRow.sgst === 1.68 && goutRow.taxable === 18.64, 'GST output register: 22 incl. 18% = 18.64 + CGST 1.68 + SGST 1.68', goutRow);
+  check(gout.data.sections[1].rows.some((r) => r.rate === '18%'), 'output register has a rate-wise summary');
+  const gx = await mgr.client.get(`/reports/gst/output?from=${today}&to=${today}&format=xlsx`);
+  check(gx.status === 200 && gx.type.includes('spreadsheet'), 'GST register downloads as Excel');
+  check((await cashier.client.get('/reports/gst/output')).status === 403 && (await keeper.client.get('/reports/gst/input')).status === 403, 'cashier and store keeper cannot open GST registers');
+  const audC = (await admin.get(`/audit?from=${today}&to=${today}`)).data.rows.find((r) => r.action === 'PRICE_CHANGE' && String(r.entityId) === String(C));
+  check(!!audC, 'GRN price change is in the audit log');
+  await admin.put('/settings', { ...regd, gstin: settingsBefore.gstin, gstMode: settingsBefore.gstMode });
+  await admin.post(`/products/${C}/deactivate`);
 
   console.log('\nAudit and sessions');
   const audit = (await admin.get(`/audit?from=${today}&to=${today}`)).data.rows.map((r) => r.action);

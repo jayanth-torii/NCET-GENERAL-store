@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { FormEvent, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { get, post, qs } from '../lib/api';
 import { MANAGE, useAuth } from '../lib/auth';
 import { date, money, todayIso } from '../lib/format';
@@ -25,15 +25,18 @@ interface Row {
 export function Purchases() {
   const nav = useNavigate();
   const [f, setF] = useState({ status: '', q: '', supplierId: '', page: 1 });
-  const [newOpen, setNewOpen] = useState(false);
+  // Transactions → New purchase (GRN) opens this page with ?new=1.
+  const [params, setParams] = useSearchParams();
+  const newOpen = params.get('new') === '1';
+  const setNewOpen = (v: boolean) => setParams(v ? { new: '1' } : {}, { replace: !v });
   const suppliers = useQuery({ queryKey: ['suppliers'], queryFn: () => get<Supplier[]>('/suppliers') });
   const list = useQuery({ queryKey: ['purchases', f], queryFn: () => get<{ rows: Row[]; total: number; page: number; pageSize: number }>(`/purchases${qs({ ...f, pageSize: 100 })}`) });
   const set = (p: Partial<typeof f>) => setF((x) => ({ ...x, ...p, page: p.page ?? 1 }));
   return (
     <div>
       <PageHeader
-        title="Purchases"
-        subtitle="Supplier bills. A purchase adds to stock only when posted, and posting needs the total to match the supplier bill."
+        title="Purchases (GRN)"
+        subtitle="Supplier bills. Each gets a GRN number when first saved. Stock goes up only when the GRN is posted, and posting needs the total to match the invoice amount."
         actions={
           <Button variant="primary" onClick={() => setNewOpen(true)}>
             New purchase
@@ -51,7 +54,7 @@ export function Purchases() {
             </Select>
           )}
         </Field>
-        <Field label="Invoice or purchase no">{(id) => <Input id={id} value={f.q} onChange={(e) => set({ q: e.target.value })} />}</Field>
+        <Field label="Invoice or GRN no">{(id) => <Input id={id} value={f.q} onChange={(e) => set({ q: e.target.value })} />}</Field>
         <Field label="Supplier">
           {(id) => (
             <Select id={id} value={f.supplierId} onChange={(e) => set({ supplierId: e.target.value })}>
@@ -75,13 +78,13 @@ export function Purchases() {
             <Table>
               <thead>
                 <tr>
-                  <th className={th}>Purchase</th>
+                  <th className={th}>GRN no</th>
                   <th className={th}>Supplier</th>
                   <th className={th}>Invoice</th>
                   <th className={th}>Invoice date</th>
                   <th className={th}>Status</th>
                   <th className={cx(th, 'text-right')}>Lines</th>
-                  <th className={cx(th, 'text-right')}>Total ₹</th>
+                  <th className={cx(th, 'text-right')}>Invoice amt ₹</th>
                   <th className={th}>Entered by</th>
                 </tr>
               </thead>
@@ -118,6 +121,7 @@ function NewPurchase({ open, onClose, suppliers }: { open: boolean; onClose: () 
   const [inv, setInv] = useState('');
   const [invDate, setInvDate] = useState(todayIso());
   const [inclusive, setInclusive] = useState(true);
+  const [amount, setAmount] = useState('');
   const [newSup, setNewSup] = useState('');
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -137,11 +141,14 @@ function NewPurchase({ open, onClose, suppliers }: { open: boolean; onClose: () 
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    const amt = Number(amount);
+    if (amount.trim() === '' || !(amt > 0)) return setErr(new Error('Enter the invoice amount (the grand total printed on the supplier bill)'));
     setBusy(true);
     setErr(null);
     try {
-      const p = await post<{ id: number }>('/purchases', { supplierId: Number(supplierId), supplierInvoiceNo: inv, invoiceDate: invDate, taxInclusive: inclusive });
+      const p = await post<{ id: number; purchaseNo: string }>('/purchases', { supplierId: Number(supplierId), supplierInvoiceNo: inv, invoiceDate: invDate, taxInclusive: inclusive, invoiceTotal: amt });
       void qc.invalidateQueries({ queryKey: ['purchases'] });
+      toast(`${p.purchaseNo} created. Write this GRN number on the supplier bill.`);
       nav(`/purchases/${p.id}`);
     } catch (x) {
       setErr(x);
@@ -151,7 +158,7 @@ function NewPurchase({ open, onClose, suppliers }: { open: boolean; onClose: () 
   };
 
   return (
-    <Modal open={open} onClose={onClose} title="New purchase">
+    <Modal open={open} onClose={onClose} title="New purchase (GRN)">
       <form onSubmit={submit} className="space-y-4">
         <Field label="Supplier">
           {(id) => (
@@ -181,6 +188,9 @@ function NewPurchase({ open, onClose, suppliers }: { open: boolean; onClose: () 
           <Field label="Invoice / DC no">{(id) => <Input id={id} value={inv} onChange={(e) => setInv(e.target.value)} required maxLength={40} className="font-mono" />}</Field>
           <Field label="Invoice date">{(id) => <Input id={id} type="date" value={invDate} max={todayIso()} onChange={(e) => setInvDate(e.target.value)} required />}</Field>
         </div>
+        <Field label="Invoice amount ₹ (grand total on the supplier bill)">
+          {(id) => <Input id={id} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} required className="text-right font-mono text-lg" placeholder="0.00" />}
+        </Field>
         <Checkbox label="Rates on this bill already include GST" checked={inclusive} onChange={setInclusive} />
         <ErrorBox error={err} />
         <div className="flex justify-end gap-2">

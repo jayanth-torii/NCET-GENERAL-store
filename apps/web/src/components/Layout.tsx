@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { get } from '../lib/api';
 import { BILLING, MANAGE, PURCHASE, useAuth } from '../lib/auth';
 import { altOf, billingKey } from '../lib/keys';
@@ -8,16 +8,203 @@ import { ROLE_LABEL } from '../lib/format';
 import type { Role, Settings } from '../lib/types';
 import { Button, cx, ErrorBox, Field, Input, Kbd, useToast } from './ui';
 
-const NAV: { to: string; label: string; roles: Role[] }[] = [
-  { to: '/', label: 'Dashboard', roles: ['ADMIN', 'MANAGER', 'STORE_KEEPER', 'CASHIER'] },
-  { to: '/billing', label: 'Counter sales', roles: BILLING },
-  { to: '/sales', label: 'Sales register', roles: ['ADMIN', 'MANAGER', 'CASHIER'] },
-  { to: '/purchases', label: 'Purchases', roles: PURCHASE },
-  { to: '/products', label: 'Products', roles: PURCHASE },
-  { to: '/stock', label: 'Stock', roles: PURCHASE },
-  { to: '/reports', label: 'Reports', roles: ['ADMIN', 'MANAGER', 'STORE_KEEPER', 'CASHIER'] },
-  { to: '/admin', label: 'Settings & users', roles: MANAGE },
+const ALL: Role[] = ['ADMIN', 'MANAGER', 'STORE_KEEPER', 'CASHIER'];
+const ADMIN: Role[] = ['ADMIN'];
+const SALES_VIEW: Role[] = ['ADMIN', 'MANAGER', 'CASHIER'];
+
+interface MenuItem {
+  to: string;
+  label: string;
+  roles: Role[];
+  key?: string; // shortcut shown on the right
+  sep?: boolean; // divider above this item
+}
+interface MenuGroup {
+  label: string;
+  items: MenuItem[];
+}
+
+/** Classic desktop-POS menu bar across the top, grouped like the store's previous billing software. */
+// Grouped the way the store's previous desktop software (Wondersoft Shopaid) arranges its menus,
+// so staff find each screen under the heading they already know.
+const MENU: MenuGroup[] = [
+  {
+    label: 'File',
+    items: [
+      { to: '/products', label: 'Product', roles: PURCHASE },
+      { to: '/admin?tab=suppliers', label: 'Supplier', roles: MANAGE },
+      { to: '/admin?tab=catalogue', label: 'Product group & unit', roles: MANAGE },
+      { to: '/admin?tab=kits', label: 'Section kits', roles: MANAGE },
+      { to: '/admin?tab=charges', label: 'Transport / charge types', roles: ADMIN, sep: true },
+      { to: '/admin?tab=counters', label: 'Counters', roles: ADMIN },
+      { to: '/admin?tab=users', label: 'User', roles: MANAGE, sep: true },
+      { to: '/admin?tab=settings', label: 'Store settings & GSTIN', roles: ADMIN },
+    ],
+  },
+  {
+    label: 'Sales',
+    items: [
+      { to: '/billing', label: 'Retail bill (counter sales)', roles: BILLING, key: 'F2' },
+      { to: '/sales', label: 'Bill view / return against bill', roles: SALES_VIEW },
+      { to: '/reports?tab=daily', label: 'Daily sales report', roles: SALES_VIEW, sep: true },
+      { to: '/reports?tab=monthly', label: 'Monthly sales report', roles: MANAGE },
+      { to: '/reports?tab=register', label: 'Sales register report', roles: MANAGE },
+      { to: '/reports?tab=kits', label: 'Section kit sales', roles: MANAGE },
+      { to: '/gst?tab=output', label: 'GST output register', roles: MANAGE },
+    ],
+  },
+  {
+    label: 'Purchase',
+    items: [
+      { to: '/purchases?new=1', label: 'Purchase entry (new GRN)', roles: PURCHASE },
+      { to: '/purchases', label: 'Purchase view / returns', roles: PURCHASE },
+      { to: '/reports?tab=purchases', label: 'Purchase report', roles: MANAGE, sep: true },
+      { to: '/gst?tab=input', label: 'GST input register', roles: MANAGE },
+    ],
+  },
+  {
+    label: 'Inventory',
+    items: [
+      { to: '/stock?tab=adjust', label: 'Stock adjustment', roles: PURCHASE },
+      { to: '/stock?tab=ledger', label: 'Product enquiry (item ledger)', roles: PURCHASE },
+      { to: '/stock', label: 'Stock value report', roles: PURCHASE, sep: true },
+      { to: '/stock?tab=low', label: 'Low & nil stock report', roles: PURCHASE },
+      { to: '/reports?tab=dead', label: 'Non-moving stock', roles: PURCHASE },
+      { to: '/reports?tab=yearly', label: 'Yearly stock (FY)', roles: PURCHASE },
+    ],
+  },
+  {
+    label: 'Expiry/Damage',
+    items: [
+      { to: '/stock?tab=expiry', label: 'Expiry report', roles: PURCHASE },
+      { to: '/stock?tab=adjust', label: 'Write off expired / damaged', roles: PURCHASE },
+    ],
+  },
+  {
+    label: 'Reports',
+    items: [
+      { to: '/reports?tab=daily', label: 'Daily sales', roles: SALES_VIEW },
+      { to: '/reports?tab=monthly', label: 'Monthly sales', roles: MANAGE },
+      { to: '/reports?tab=register', label: 'Sales register', roles: MANAGE },
+      { to: '/reports?tab=purchases', label: 'Purchase register', roles: MANAGE },
+      { to: '/reports?tab=kits', label: 'Section kits', roles: MANAGE },
+      { to: '/stock', label: 'Stock value', roles: PURCHASE, sep: true },
+      { to: '/reports?tab=yearly', label: 'Yearly stock (FY)', roles: PURCHASE },
+      { to: '/reports?tab=dead', label: 'Dead stock', roles: PURCHASE },
+    ],
+  },
+  {
+    label: 'GST',
+    items: [
+      { to: '/gst?tab=input', label: 'GST input register (purchases)', roles: MANAGE },
+      { to: '/gst?tab=output', label: 'GST output register (sales)', roles: MANAGE },
+    ],
+  },
+  {
+    label: 'Maintenance',
+    items: [
+      { to: '/admin?tab=sessions', label: 'Who is logged in', roles: MANAGE },
+      { to: '/admin?tab=audit', label: 'Audit log', roles: MANAGE },
+      { to: '/admin?tab=golive', label: 'Go-live tools / backup', roles: ADMIN },
+      { to: '/account', label: 'Change my password', roles: ALL, sep: true },
+    ],
+  },
 ];
+
+/** Does this menu item point at the page (and tab) on screen now? */
+function isCurrent(to: string, pathname: string, search: string) {
+  const [path, query] = to.split('?');
+  if (path !== pathname) return false;
+  const want = new URLSearchParams(query ?? '').get('tab');
+  const have = new URLSearchParams(search).get('tab');
+  return want === null ? have === null || path === '/' : want === have;
+}
+
+function MenuBar({ groups, mobileOpen }: { groups: MenuGroup[]; mobileOpen: boolean }) {
+  const loc = useLocation();
+  const [open, setOpen] = useState<string | null>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  useEffect(() => setOpen(null), [loc.pathname, loc.search]);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (barRef.current && !barRef.current.contains(e.target as Node)) setOpen(null);
+    };
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(null);
+    window.addEventListener('mousedown', away);
+    window.addEventListener('keydown', esc);
+    return () => {
+      window.removeEventListener('mousedown', away);
+      window.removeEventListener('keydown', esc);
+    };
+  }, [open]);
+  const homeActive = loc.pathname === '/';
+  const tab = (active: boolean) =>
+    cx(
+      'relative flex h-10 items-center gap-1 whitespace-nowrap px-4 text-[13px] font-semibold uppercase tracking-wide transition-colors',
+      active ? 'text-brand-500 after:absolute after:inset-x-3 after:bottom-0 after:h-[3px] after:rounded-t after:bg-brand-500' : 'text-ink-soft hover:bg-white/5 hover:text-white',
+    );
+  const item = (i: MenuItem, active: boolean) => (
+    <Link
+      key={i.to}
+      to={i.to}
+      role="menuitem"
+      onClick={() => setOpen(null)}
+      className={cx('flex items-center justify-between gap-6 rounded-lg px-3 py-2 text-sm', active ? 'bg-brand-500/15 text-brand-500' : 'text-ink hover:bg-white/[0.07] hover:text-white')}
+    >
+      {i.label}
+      {i.key && <Kbd>{i.key}</Kbd>}
+    </Link>
+  );
+  return (
+    <nav ref={barRef} aria-label="Main menu" className={cx('border-t border-white/[0.06] bg-[#0B1838]', mobileOpen ? 'block' : 'hidden lg:block')}>
+      {/* wide screens: one row of menus with drop-downs */}
+      <div className="hidden h-10 items-stretch px-2 lg:flex">
+        <Link to="/" className={tab(homeActive)}>
+          Home
+        </Link>
+        {groups.map((g) => {
+          const active = g.items.some((i) => isCurrent(i.to, loc.pathname, loc.search));
+          const isOpen = open === g.label;
+          return (
+            <div key={g.label} className="relative" onMouseEnter={() => open && setOpen(g.label)}>
+              <button type="button" aria-haspopup="menu" aria-expanded={isOpen} className={tab(active || isOpen)} onClick={() => setOpen(isOpen ? null : g.label)}>
+                {g.label}
+                <span aria-hidden className={cx('text-[10px] transition-transform', isOpen && 'rotate-180')}>
+                  ▾
+                </span>
+              </button>
+              {isOpen && (
+                <div role="menu" aria-label={g.label} className="absolute left-0 top-full z-40 mt-1 min-w-[240px] rounded-xl border border-white/10 bg-surface p-1.5 shadow-2xl">
+                  {g.items.map((i, n) => (
+                    <div key={i.to}>
+                      {i.sep && n > 0 && <div className="my-1 border-t border-white/[0.07]" />}
+                      {item(i, isCurrent(i.to, loc.pathname, loc.search))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {/* small screens: every menu listed under the ☰ button (only in the page while open) */}
+      {mobileOpen && (
+      <div className="max-h-[70vh] overflow-y-auto p-2 lg:hidden">
+        <Link to="/" className={cx('block rounded-lg px-3 py-2 text-sm font-semibold', homeActive ? 'text-brand-500' : 'text-white')}>
+          Home
+        </Link>
+        {groups.map((g) => (
+          <div key={g.label} className="mt-2">
+            <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-mute">{g.label}</div>
+            {g.items.map((i) => item(i, isCurrent(i.to, loc.pathname, loc.search)))}
+          </div>
+        ))}
+      </div>
+      )}
+    </nav>
+  );
+}
 
 function ServerClock() {
   const { data } = useQuery({ queryKey: ['time'], queryFn: () => get<{ iso: string }>('/auth/time'), refetchInterval: 5 * 60_000 });
@@ -142,8 +329,9 @@ export function Layout() {
   }, []);
   if (!me) return null;
   const locked = me.locked;
-  const items = NAV.filter((n) => can(...n.roles));
+  const groups = MENU.map((g) => ({ ...g, items: g.items.filter((i) => can(...i.roles)) })).filter((g) => g.items.length > 0);
   const billing = loc.pathname.startsWith('/billing');
+  const gstin = settings.data?.gstin;
   return (
     <div className="flex min-h-screen flex-col">
       {locked && <LockScreen />}
@@ -157,9 +345,15 @@ export function Layout() {
             <img src="/ncet-logo.png" alt="Nagarjuna College of Engineering & Technology" className="h-8 w-auto" />
           </span>
           <div className="hidden flex-col leading-tight sm:flex">
-            <span className="text-sm font-bold tracking-tight text-white">General Store</span>
+            <span className="text-sm font-bold tracking-tight text-white">{settings.data?.storeName ?? 'General Store'}</span>
             <span className="text-[11px] font-medium uppercase tracking-wider text-brand-500">Point of sale</span>
           </div>
+          <span
+            className={cx('hidden rounded-md border px-2 py-0.5 font-mono text-[11px] md:inline', gstin ? 'border-brand-500/40 text-brand-500' : 'border-white/10 text-ink-mute')}
+            title={gstin ? 'Store GSTIN (Utilities → Store settings)' : 'No GSTIN set. The admin can add it in Utilities → Store settings.'}
+          >
+            GSTIN {gstin || 'not set'}
+          </span>
           <div className="ml-auto flex items-center gap-3 text-sm">
             <ServerClock />
             <span className="hidden rounded-full bg-brand-500/15 px-2.5 py-0.5 font-mono text-xs text-brand-500 sm:inline">{me.counterCode ?? 'No counter'}</span>
@@ -174,32 +368,11 @@ export function Layout() {
             </button>
           </div>
         </div>
+        <MenuBar groups={groups} mobileOpen={menu} />
       </header>
-      <div className="flex min-h-0 flex-1">
-        <nav className={cx('w-56 shrink-0 bg-[#081330] p-3', 'fixed inset-y-14 left-0 z-20 lg:static lg:block', menu ? 'block' : 'hidden', billing && 'lg:hidden xl:block')}>
-          <ul className="space-y-1">
-            {items.map((n) => (
-              <li key={n.to}>
-                <NavLink
-                  to={n.to}
-                  end={n.to === '/'}
-                  className={({ isActive }) => cx('block rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors', isActive ? 'bg-brand-500/15 text-brand-500' : 'text-ink-mute hover:bg-white/5 hover:text-white')}
-                >
-                  {n.label}
-                </NavLink>
-              </li>
-            ))}
-            <li className="pt-2">
-              <NavLink to="/account" className={({ isActive }) => cx('block rounded-xl px-3.5 py-2.5 text-sm', isActive ? 'bg-brand-500/15 text-brand-500' : 'text-ink-mute/70 hover:text-white')}>
-                My password
-              </NavLink>
-            </li>
-          </ul>
-        </nav>
-        <main className={cx('min-w-0 flex-1', billing ? 'p-3' : 'p-4 sm:p-6')}>
-          <Outlet />
-        </main>
-      </div>
+      <main className={cx('min-w-0 flex-1', billing ? 'p-3' : 'p-4 sm:p-6')}>
+        <Outlet />
+      </main>
     </div>
   );
 }
