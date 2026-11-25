@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="230" viewBox="0 0 1200 230" role="img" aria-labelledby="t">
+<title id="t">Moving from Link-Zee in five steps</title>
+<style>.h{font:800 30px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#0c2339;letter-spacing:-.5px}.t{font:700 18px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#0c2339}.p{font:500 15px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#404040}.pb{font-weight:700;fill:#0c2339}.s{font:500 13px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#737373}.eb{font:700 12px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;letter-spacing:3px}.m{font:600 14px Consolas,'SFMono-Regular',Menlo,'Courier New',monospace}.e{font-family:'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif}.card{fill:#f8fafc;stroke:#e2e8f0}.ln{stroke:#e2e8f0}.ink{fill:#0c2339}.trk{fill:#e5e7eb}@media (prefers-color-scheme: dark){.h,.t,.ink,.pb{fill:#f0f6fc}.p{fill:#c9d1d9}.s{fill:#8b949e}.card{fill:#161b22;stroke:#30363d}.ln{stroke:#30363d}.trk{fill:#30363d}}@keyframes a0{0%,3.33%{transform:scaleX(0)}66.67%,92.00%{transform:scaleX(1)}100%{transform:scaleX(0)}}.a0{transform-box:fill-box;transform-origin:left center;animation:a0 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a1{0%,3.33%{transform:scale(0)}6.25%{transform:scale(1.2)}7.92%,92.00%{transform:scale(1)}100%{transform:scale(0)}}.a1{transform-box:fill-box;transform-origin:center;animation:a1 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a2{0%,3.33%{opacity:0;transform:translateY(12px)}8.33%,92.00%{opacity:1;transform:none}100%{opacity:0;transform:none}}.a2{animation:a2 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a3{0%,19.17%{transform:scale(0)}22.08%{transform:scale(1.2)}23.75%,92.00%{transform:scale(1)}100%{transform:scale(0)}}.a3{transform-box:fill-box;transform-origin:center;animation:a3 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a4{0%,19.17%{opacity:0;transform:translateY(12px)}24.17%,92.00%{opacity:1;transform:none}100%{opacity:0;transform:none}}.a4{animation:a4 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a5{0%,35.00%{transform:scale(0)}37.92%{transform:scale(1.2)}39.58%,92.00%{transform:scale(1)}100%{transform:scale(0)}}.a5{transform-box:fill-box;transform-origin:center;animation:a5 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a6{0%,35.00%{opacity:0;transform:translateY(12px)}40.00%,92.00%{opacity:1;transform:none}100%{opacity:0;transform:none}}.a6{animation:a6 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a7{0%,50.83%{transform:scale(0)}53.75%{transform:scale(1.2)}55.42%,92.00%{transform:scale(1)}100%{transform:scale(0)}}.a7{transform-box:fill-box;transform-origin:center;animation:a7 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a8{0%,50.83%{opacity:0;transform:translateY(12px)}55.83%,92.00%{opacity:1;transform:none}100%{opacity:0;transform:none}}.a8{animation:a8 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a9{0%,66.67%{transform:scale(0)}69.58%{transform:scale(1.2)}71.25%,92.00%{transform:scale(1)}100%{transform:scale(0)}}.a9{transform-box:fill-box;transform-origin:center;animation:a9 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a10{0%,66.67%{opacity:0;transform:translateY(12px)}71.67%,92.00%{opacity:1;transform:none}100%{opacity:0;transform:none}}.a10{animation:a10 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@keyframes a11{0%,69.17%{opacity:0;transform:translateY(12px)}74.17%,92.00%{opacity:1;transform:none}100%{opacity:0;transform:none}}.a11{animation:a11 12s cubic-bezier(.2,.8,.2,1) 0s infinite}@media (prefers-reduced-motion: reduce){*{animation:none!important}.mv{display:none}}</style>
+<defs></defs>
+<rect class="trk" x="120" y="66" width="960" height="6" rx="3"/>
+<rect class="a0" x="120" y="66" width="960" height="6" rx="3" fill="#13aa52"/>
+<circle class="card" cx="120" cy="69" r="28" stroke-width="2"/>
+<g class="a1"><circle cx="120" cy="69" r="28" fill="#13aa52"/></g>
+<text x="120" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#94a3b8">1</text>
+<g class="a2"><text x="120" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#fff">1</text></g>
+<text x="120" y="132" text-anchor="middle" class="p" style="font-weight:700">Copy the .mdb,</text>
+<text x="120" y="154" text-anchor="middle" class="p">export the Item Master</text>
+<circle class="card" cx="360" cy="69" r="28" stroke-width="2"/>
+<g class="a3"><circle cx="360" cy="69" r="28" fill="#13aa52"/></g>
+<text x="360" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#94a3b8">2</text>
+<g class="a4"><text x="360" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#fff">2</text></g>
+<text x="360" y="132" text-anchor="middle" class="p" style="font-weight:700">Fix spellings, merge</text>
+<text x="360" y="154" text-anchor="middle" class="p">duplicates, keep codes</text>
+<circle class="card" cx="600" cy="69" r="28" stroke-width="2"/>
+<g class="a5"><circle cx="600" cy="69" r="28" fill="#13aa52"/></g>
+<text x="600" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#94a3b8">3</text>
+<g class="a6"><text x="600" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#fff">3</text></g>
+<text x="600" y="132" text-anchor="middle" class="p" style="font-weight:700">Import Excel —</text>
+<text x="600" y="154" text-anchor="middle" class="p">all rows or none</text>
+<circle class="card" cx="840" cy="69" r="28" stroke-width="2"/>
+<g class="a7"><circle cx="840" cy="69" r="28" fill="#13aa52"/></g>
+<text x="840" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#94a3b8">4</text>
+<g class="a8"><text x="840" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#fff">4</text></g>
+<text x="840" y="132" text-anchor="middle" class="p" style="font-weight:700">Count the shelves,</text>
+<text x="840" y="154" text-anchor="middle" class="p">upload on cutover day</text>
+<circle class="card" cx="1080" cy="69" r="28" stroke-width="2"/>
+<g class="a9"><circle cx="1080" cy="69" r="28" fill="#13aa52"/></g>
+<text x="1080" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#94a3b8">5</text>
+<g class="a10"><text x="1080" y="76" text-anchor="middle" style="font:800 20px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#fff">✓</text></g>
+<text x="1080" y="132" text-anchor="middle" class="p" style="font-weight:700">Run both for a week,</text>
+<text x="1080" y="154" text-anchor="middle" class="p">then switch off Link-Zee</text>
+<g class="a11"><text x="600" y="206" text-anchor="middle" style="font:800 16px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#16a34a">Daily totals match → Link-Zee retired 🎉</text></g>
+</svg>

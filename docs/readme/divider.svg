@@ -1,15 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="24" viewBox="0 0 1200 24" role="presentation">
-  <defs>
-    <linearGradient id="g" x1="0" x2="1">
-      <stop offset="0" stop-color="#0F4C81" stop-opacity="0"/>
-      <stop offset="0.5" stop-color="#4a9bd4"/>
-      <stop offset="1" stop-color="#0F4C81" stop-opacity="0"/>
-    </linearGradient>
-  </defs>
-  <style>
-    .w{fill:none;stroke:url(#g);stroke-width:2.5;animation:w 6s ease-in-out infinite alternate}
-    @keyframes w{to{d:path("M0 12 Q 150 22 300 12 T 600 12 T 900 12 T 1200 12")}}
-    @media (prefers-reduced-motion: reduce){.w{animation:none}}
-  </style>
-  <path class="w" d="M0 12 Q 150 2 300 12 T 600 12 T 900 12 T 1200 12"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="24" viewBox="0 0 1200 24" role="img" aria-labelledby="t">
+<title id="t">divider</title>
+<style>.h{font:800 30px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#0c2339;letter-spacing:-.5px}.t{font:700 18px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#0c2339}.p{font:500 15px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#404040}.pb{font-weight:700;fill:#0c2339}.s{font:500 13px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;fill:#737373}.eb{font:700 12px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif;letter-spacing:3px}.m{font:600 14px Consolas,'SFMono-Regular',Menlo,'Courier New',monospace}.e{font-family:'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif}.card{fill:#f8fafc;stroke:#e2e8f0}.ln{stroke:#e2e8f0}.ink{fill:#0c2339}.trk{fill:#e5e7eb}@media (prefers-color-scheme: dark){.h,.t,.ink,.pb{fill:#f0f6fc}.p{fill:#c9d1d9}.s{fill:#8b949e}.card{fill:#161b22;stroke:#30363d}.ln{stroke:#30363d}.trk{fill:#30363d}}@media (prefers-reduced-motion: reduce){*{animation:none!important}.mv{display:none}}</style>
+<defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#0F4C81" stop-opacity="0"/><stop offset=".5" stop-color="#4a9bd4"/><stop offset="1" stop-color="#0F4C81" stop-opacity="0"/></linearGradient></defs>
+<path d="M0 12 Q 150 2 300 12 T 600 12 T 900 12 T 1200 12" fill="none" stroke="url(#g)" stroke-width="2.5"><animate class="mv" attributeName="d" values="M0 12 Q 150 2 300 12 T 600 12 T 900 12 T 1200 12;M0 12 Q 150 22 300 12 T 600 12 T 900 12 T 1200 12;M0 12 Q 150 2 300 12 T 600 12 T 900 12 T 1200 12" dur="6s" repeatCount="indefinite"/></path>
+<g class="mv"><circle r="3.5" fill="#4a9bd4"><animateMotion dur="6s" repeatCount="indefinite" path="M0 12H1200"/><animate attributeName="opacity" values="0;1;1;0" dur="6s" repeatCount="indefinite"/></circle></g>
 </svg>
