@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="210" viewBox="0 0 1200 210" role="img" aria-labelledby="t">
+  <title id="t">Life of a bill: scan, F10, one MongoDB transaction (bill number, lines, stock, ledger), print</title>
+  <style>
+    .card{fill:#fff;stroke:#d4d4d4}
+    .h{font:700 16px 'Segoe UI',Inter,Arial,sans-serif;fill:#0a0a0a}
+    .p{font:500 12.5px 'Segoe UI',Inter,Arial,sans-serif;fill:#525252}
+    .k{font:700 12px Consolas,monospace;fill:#0F4C81}
+    .step{animation:hl 8s ease-in-out infinite}
+    .s2{animation-delay:2s}.s3{animation-delay:4s}.s4{animation-delay:6s}
+    @keyframes hl{0%,20%{stroke:#0F4C81;stroke-width:3}26%,100%{stroke:#d4d4d4;stroke-width:1}}
+    .arrow{fill:none;stroke:#94a3b8;stroke-width:2;stroke-dasharray:4 6;animation:mv 1s linear infinite}
+    @keyframes mv{to{stroke-dashoffset:-20}}
+    .runner{animation:run 8s linear infinite}
+    @keyframes run{0%{transform:translateX(0)}25%{transform:translateX(296px)}50%{transform:translateX(592px)}75%{transform:translateX(888px)}100%{transform:translateX(888px)}}
+    @media (prefers-color-scheme: dark){.card{fill:#161b22;stroke:#30363d}.h{fill:#f0f6fc}.p{fill:#c9d1d9}.k{fill:#84bde4}.bgr{fill:#0d1117}}
+    @media (prefers-reduced-motion: reduce){*{animation:none!important}}
+  </style>
+  <rect class="bgr" width="1200" height="210" rx="20" fill="#f8fafc"/>
+  <g transform="translate(24 36)">
+    <rect class="card step" width="260" height="132" rx="14"/>
+    <text x="20" y="34" class="h">① Scan / search</text><text x="20" y="60" class="p">barcode, code or name</text><text x="20" y="80" class="p">5*123 = five of item 123</text><text x="20" y="110" class="k">F2 · quick keys · kits</text>
+  </g>
+  <path class="arrow" d="M288 102 L 316 102"/>
+  <g transform="translate(320 36)">
+    <rect class="card step s2" width="260" height="132" rx="14"/>
+    <text x="20" y="34" class="h">② Pay &amp; press F10</text><text x="20" y="60" class="p">cash · UPI QR · card, split</text><text x="20" y="80" class="p">one idempotency key per bill</text><text x="20" y="110" class="k">double F10 = same bill</text>
+  </g>
+  <path class="arrow" d="M584 102 L 612 102"/>
+  <g transform="translate(616 36)">
+    <rect class="card step s3" width="260" height="132" rx="14"/>
+    <text x="20" y="34" class="h">③ One transaction</text><text x="20" y="60" class="p">C1/26-27/000481 (gapless)</text><text x="20" y="80" class="p">lines + payments + stock + ledger</text><text x="20" y="110" class="k">all or nothing</text>
+  </g>
+  <path class="arrow" d="M880 102 L 908 102"/>
+  <g transform="translate(912 36)">
+    <rect class="card step s4" width="264" height="132" rx="14"/>
+    <text x="20" y="34" class="h">④ Receipt</text><text x="20" y="60" class="p">80 mm, no print dialog</text><text x="20" y="80" class="p">reprints stamped DUPLICATE n</text><text x="20" y="110" class="k">PDF of any bill, any time</text>
+  </g>
+  <circle class="runner" cx="154" cy="182" r="7" fill="#0F4C81"/>
+</svg>

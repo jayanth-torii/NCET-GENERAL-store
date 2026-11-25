@@ -1,10 +1,11 @@
+import { invoiceKey, withTx } from '../prisma/prisma.service';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { EntryUnit, MovementKind, Prisma, PurchaseStatus, Role } from '@prisma/client';
 import { z } from 'zod';
 import { SessionUser } from '../auth/auth.decorators';
 import { AuditService } from '../common/audit.service';
 import { nextDocNo } from '../common/doc-number';
-import { D, Dec, round2, sum } from '../common/money';
+import { D, Dec, num, round2, sum } from '../common/money';
 import { SettingsService } from '../common/settings.service';
 import { applyMovements, Movement } from '../common/stock-ledger';
 import { istDate, istRange } from '../common/time';
@@ -92,7 +93,7 @@ export class PurchaseService {
     await this.loadSupplier(input.supplierId);
     await this.assertInvoiceFree(input.supplierId, input.supplierInvoiceNo);
     // The GRN number is given the moment the bill is first saved, so it can be written on the supplier bill.
-    const p = await this.prisma.$transaction(async (tx) =>
+    const p = await withTx(this.prisma, async (tx) =>
       tx.purchase.create({
         data: {
           purchaseNo: await nextDocNo(tx, 'GRN'),
@@ -101,7 +102,7 @@ export class PurchaseService {
           invoiceDate: new Date(`${input.invoiceDate}T00:00:00Z`),
           taxInclusive: input.taxInclusive,
           notes: input.notes ?? null,
-          invoiceTotal: input.invoiceTotal === null || input.invoiceTotal === undefined ? null : D(input.invoiceTotal),
+          invoiceTotal: input.invoiceTotal === null || input.invoiceTotal === undefined ? null : num(input.invoiceTotal),
           createdById: user.id,
         },
       }),
@@ -113,7 +114,7 @@ export class PurchaseService {
     const clash = await this.prisma.purchase.findFirst({
       where: {
         supplierId,
-        supplierInvoiceNo: { equals: invoiceNo.trim(), mode: 'insensitive' },
+        invoiceKey: invoiceKey(invoiceNo),
         status: { not: PurchaseStatus.CANCELLED },
         ...(exceptId ? { id: { not: exceptId } } : {}),
       },
@@ -167,7 +168,7 @@ export class PurchaseService {
       settings.gstMode === 'REGISTERED',
     );
 
-    await this.prisma.$transaction(async (tx) => {
+    await withTx(this.prisma, async (tx) => {
       const cur = await this.lockDraft(tx, id);
       if (cur.createdById !== user.id && !MANAGERS.includes(user.role)) {
         throw new ForbiddenException('Only the person who started this draft or a manager can change it');
@@ -185,35 +186,35 @@ export class PurchaseService {
           notes: input.notes ?? null,
           readyAt: null, // any change needs a fresh "ready" from the store keeper
           readyById: null,
-          itemsTotal: totals.itemsTotal,
-          taxTotal: totals.taxTotal,
-          chargesTotal: totals.chargesTotal,
-          discountTotal: totals.discountTotal,
-          roundOff: totals.roundOff,
-          grandTotal: totals.grandTotal,
-          invoiceTotal: input.invoiceTotal === null || input.invoiceTotal === undefined ? null : D(input.invoiceTotal),
+          itemsTotal: num(totals.itemsTotal),
+          taxTotal: num(totals.taxTotal),
+          chargesTotal: num(totals.chargesTotal),
+          discountTotal: num(totals.discountTotal),
+          roundOff: num(totals.roundOff),
+          grandTotal: num(totals.grandTotal),
+          invoiceTotal: input.invoiceTotal === null || input.invoiceTotal === undefined ? null : num(input.invoiceTotal),
           items: {
             create: prepared.map((x, i) => ({
               lineNo: i + 1,
               productId: x.p.id,
               entryUnit: x.l.entryUnit,
-              enteredQty: x.enteredQty,
-              packSize: x.packSize,
-              baseQty: x.baseQty,
-              rate: totals.lines[i].rate,
-              grossAmount: totals.lines[i].grossAmount,
-              discount: totals.lines[i].discount,
-              gstRate: x.gstRate,
-              taxAmount: totals.lines[i].taxAmount,
-              lineTotal: totals.lines[i].lineTotal,
-              landedUnitCost: totals.lines[i].landedUnitCost,
+              enteredQty: num(x.enteredQty),
+              packSize: num(x.packSize),
+              baseQty: num(x.baseQty),
+              rate: num(totals.lines[i].rate),
+              grossAmount: num(totals.lines[i].grossAmount),
+              discount: num(totals.lines[i].discount),
+              gstRate: num(x.gstRate),
+              taxAmount: num(totals.lines[i].taxAmount),
+              lineTotal: num(totals.lines[i].lineTotal),
+              landedUnitCost: num(totals.lines[i].landedUnitCost),
               batch: x.l.batch ?? null,
               expiry: x.l.expiry ? new Date(`${x.l.expiry}T00:00:00Z`) : null,
-              salePrice: x.l.salePrice === null || x.l.salePrice === undefined ? null : D(x.l.salePrice),
-              mrp: x.l.mrp === null || x.l.mrp === undefined ? null : D(x.l.mrp),
+              salePrice: x.l.salePrice === null || x.l.salePrice === undefined ? null : num(x.l.salePrice),
+              mrp: x.l.mrp === null || x.l.mrp === undefined ? null : num(x.l.mrp),
             })),
           },
-          charges: { create: input.charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: D(c.amount), paidTo: c.paidTo ?? null, referenceNo: c.referenceNo ?? null })) },
+          charges: { create: input.charges.map((c) => ({ chargeTypeId: c.chargeTypeId, amount: num(c.amount), paidTo: c.paidTo ?? null, referenceNo: c.referenceNo ?? null })) },
         },
       });
     });
@@ -236,8 +237,17 @@ export class PurchaseService {
     }
   }
 
+  /**
+   * Claim the purchase document for this transaction (MongoDB has no SELECT … FOR UPDATE): a write to it
+   * makes any other transaction that writes the same purchase conflict, and withTx re-runs that one,
+   * which then sees the new state (posted, cancelled, …).
+   */
+  private async claim(tx: Tx, id: number) {
+    await tx.purchase.updateMany({ where: { id }, data: { updatedAt: new Date() } });
+  }
+
   private async lockDraft(tx: Tx, id: number) {
-    await tx.$queryRaw`SELECT id FROM purchase WHERE id = ${id} FOR UPDATE`;
+    await this.claim(tx, id);
     const cur = await tx.purchase.findUnique({ where: { id } });
     if (!cur) throw new NotFoundException('Purchase not found');
     if (cur.status !== PurchaseStatus.DRAFT) throw new ConflictException('This purchase is already posted and cannot be changed');
@@ -259,7 +269,7 @@ export class PurchaseService {
 
   /** Post (FR-06): blocked unless the computed total is within Rs 1 of the supplier bill. Then stock goes up at landed cost. */
   async post(id: number, user: SessionUser, ip: string) {
-    await this.prisma.$transaction(
+    await withTx(this.prisma, 
       async (tx) => {
         await this.lockDraft(tx, id);
         const p = await tx.purchase.findUniqueOrThrow({ where: { id }, include: fullInclude });
@@ -278,11 +288,11 @@ export class PurchaseService {
         }
         const purchaseNo = p.purchaseNo ?? (await nextDocNo(tx, 'GRN'));
         for (let i = 0; i < p.items.length; i++) {
-          await tx.purchaseItem.update({ where: { id: p.items[i].id }, data: { landedUnitCost: t.lines[i].landedUnitCost, rate: t.lines[i].rate } });
+          await tx.purchaseItem.update({ where: { id: p.items[i].id }, data: { landedUnitCost: num(t.lines[i].landedUnitCost), rate: num(t.lines[i].rate) } });
         }
         // Latest landed cost becomes the product's cost (the last line wins when one product appears twice).
         for (let i = 0; i < p.items.length; i++) {
-          await tx.product.update({ where: { id: p.items[i].productId }, data: { lastCost: t.lines[i].landedUnitCost } });
+          await tx.product.update({ where: { id: p.items[i].productId }, data: { lastCost: num(t.lines[i].landedUnitCost) } });
         }
         // New sale price / MRP typed on the GRN go to the product master (last line wins), each change audited.
         const priced = new Map<number, (typeof p.items)[number]>();
@@ -308,12 +318,12 @@ export class PurchaseService {
             status: PurchaseStatus.POSTED,
             postedAt: new Date(),
             postedById: user.id,
-            itemsTotal: t.itemsTotal,
-            taxTotal: t.taxTotal,
-            chargesTotal: t.chargesTotal,
-            discountTotal: t.discountTotal,
-            roundOff: t.roundOff,
-            grandTotal: t.grandTotal,
+            itemsTotal: num(t.itemsTotal),
+            taxTotal: num(t.taxTotal),
+            chargesTotal: num(t.chargesTotal),
+            discountTotal: num(t.discountTotal),
+            roundOff: num(t.roundOff),
+            grandTotal: num(t.grandTotal),
           },
         });
         await applyMovements(
@@ -331,7 +341,7 @@ export class PurchaseService {
 
   /** Store keeper hands the draft to a manager. The totals must already match the supplier bill. */
   async markReady(id: number, user: SessionUser, ip: string) {
-    await this.prisma.$transaction(async (tx) => {
+    await withTx(this.prisma, async (tx) => {
       await this.lockDraft(tx, id);
       const p = await tx.purchase.findUniqueOrThrow({ where: { id }, include: fullInclude });
       const t = await this.computeStored(p);
@@ -344,7 +354,7 @@ export class PurchaseService {
   }
 
   async deleteDraft(id: number, user: SessionUser) {
-    await this.prisma.$transaction(async (tx) => {
+    await withTx(this.prisma, async (tx) => {
       const cur = await this.lockDraft(tx, id);
       if (cur.createdById !== user.id && !([Role.ADMIN, Role.MANAGER] as Role[]).includes(user.role)) {
         throw new ForbiddenException('Only the person who started this draft or a manager can delete it');
@@ -358,8 +368,8 @@ export class PurchaseService {
   /** Cancel a posted purchase (manager): stock taken back out with reversing movements. */
   async cancel(id: number, reason: string, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    await this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM purchase WHERE id = ${id} FOR UPDATE`;
+    await withTx(this.prisma, async (tx) => {
+      await this.claim(tx, id);
       const p = await tx.purchase.findUnique({ where: { id }, include: { items: true, returns: true } });
       if (!p) throw new NotFoundException('Purchase not found');
       if (p.status !== PurchaseStatus.POSTED) throw new ConflictException('Only a posted purchase can be cancelled. Delete a draft instead.');
@@ -388,8 +398,8 @@ export class PurchaseService {
   /** Return goods to the supplier against a posted purchase (FR-13). */
   async createReturn(id: number, input: z.infer<typeof PurchaseReturnInput>, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM purchase WHERE id = ${id} FOR UPDATE`;
+    return withTx(this.prisma, async (tx) => {
+      await this.claim(tx, id);
       const p = await tx.purchase.findUnique({ where: { id }, include: { items: { include: { returnLines: true, product: { include: { unit: true } } } } } });
       if (!p) throw new NotFoundException('Purchase not found');
       if (p.status !== PurchaseStatus.POSTED) throw new ConflictException('Returns can only be made against a posted purchase');
@@ -412,7 +422,7 @@ export class PurchaseService {
       }
       const returnNo = await nextDocNo(tx, 'PR');
       const ret = await tx.purchaseReturn.create({
-        data: { returnNo, purchaseId: id, supplierId: p.supplierId, userId: user.id, reason: input.reason, total: sum(lines.map((l) => l.amount)), items: { create: lines } },
+        data: { returnNo, purchaseId: id, supplierId: p.supplierId, userId: user.id, reason: input.reason, total: num(sum(lines.map((l) => l.amount))), items: { create: lines.map((l) => ({ purchaseItemId: l.purchaseItemId, baseQty: num(l.baseQty), amount: num(l.amount) })) } },
         include: { items: true },
       });
       const warnings = await applyMovements(tx, moves.map((m) => ({ ...m, refId: ret.id })), user.id, { blockNegative: settings.blockNegativeStock });

@@ -7,7 +7,7 @@ import { useCatalogue } from '../lib/catalogue';
 import { dateTime, monthStartIso, qty, todayIso } from '../lib/format';
 import type { Category, CatalogueItem } from '../lib/types';
 import { ReportView } from '../components/ReportView';
-import { Badge, Button, Card, Checkbox, ConfirmDialog, cx, Empty, ErrorBox, Field, Input, Loading, num, PageHeader, Select, Table, Tabs, td, th, useToast } from '../components/ui';
+import { Badge, Button, Card, Checkbox, ConfirmDialog, cx, Empty, ErrorBox, Field, Input, Loading, num, PageHeader, Select, Table, Tabs, td, th, useToast, wrap } from '../components/ui';
 
 type Tab = 'summary' | 'low' | 'expiry' | 'adjust' | 'ledger';
 const TABS: Tab[] = ['summary', 'low', 'expiry', 'adjust', 'ledger'];
@@ -286,7 +286,7 @@ function Adjustments() {
                     {Number(a.qtyChange) > 0 ? '+' : ''}
                     {qty(a.qtyChange)}
                   </td>
-                  <td className={td}>{a.reason}</td>
+                  <td className={cx(td, wrap)}>{a.reason}</td>
                   <td className={td}>
                     {a.requestedBy.fullName}
                     {a.decidedBy && <div className="text-xs text-ink-mute">decided by {a.decidedBy.fullName}</div>}

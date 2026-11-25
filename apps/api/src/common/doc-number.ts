@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { holdKeys } from './keyed-lock';
 import { fyCode } from './time';
 
 type Tx = Prisma.TransactionClient;
@@ -9,11 +10,16 @@ type Tx = Prisma.TransactionClient;
  * Each series has its own row, so different counters never wait on each other (rule R6).
  */
 export async function nextInSeries(tx: Tx, key: string): Promise<number> {
-  const rows = await tx.$queryRaw<{ value: number }[]>`
-    INSERT INTO doc_counter (key, value) VALUES (${key}, 1)
-    ON CONFLICT (key) DO UPDATE SET value = doc_counter.value + 1
-    RETURNING value`;
-  return Number(rows[0].value);
+  await holdKeys([`series:${key}`]); // two GRNs / bills of one series queue instead of aborting each other
+  // Atomic upsert + $inc inside the document's MongoDB transaction: gapless, and two counters only
+  // ever contend on their own series document.
+  const row = await tx.docCounter.upsert({
+    where: { key },
+    create: { key, value: 1 },
+    update: { value: { increment: 1 } },
+    select: { value: true },
+  });
+  return Number(row.value);
 }
 
 /** Bill number such as C2/26-27/000481. Resets every 1 April. */

@@ -10,8 +10,10 @@ import { join } from 'path';
 config({ path: join(__dirname, '..', '.env') });
 
 import { PrismaClient } from '@prisma/client';
+import { PrismaService } from '../src/prisma/prisma.service';
 
-const prisma = new PrismaClient();
+// The API's client: numeric ids from the _seq sequence, Decimal → number, uniqueness keys (MongoDB edition).
+const prisma: PrismaClient = new PrismaService();
 
 // [code or '', name, category, sale price, reorder level, GST %]
 const PRODUCTS: [string, string, string, number, number, number][] = [
@@ -107,8 +109,9 @@ async function main() {
     if (exists) continue;
     let code = wantCode;
     if (!code || (await prisma.product.findUnique({ where: { code } }))) {
-      const rows = await prisma.$queryRaw<{ max: bigint | null }[]>`SELECT max(code::bigint) AS max FROM product WHERE code ~ '^[0-9]{1,12}$'`;
-      code = String(Number(rows[0]?.max ?? 0) + 1);
+      // Highest all-digit code + 1 (MongoDB has no numeric cast in a filter; the list is small).
+      const all = await prisma.product.findMany({ select: { code: true } });
+      code = String(all.reduce((m, x) => (/^[0-9]{1,12}$/.test(x.code) ? Math.max(m, Number(x.code)) : m), 0) + 1);
     }
     const categoryId = cats.get(cat) ?? cats.get('Other')!;
     const p = await prisma.product.create({ data: { code, name, categoryId, unitId: pcs.id, salePrice: price, mrp: price, reorderLevel: reorder, gstRate: gst } });

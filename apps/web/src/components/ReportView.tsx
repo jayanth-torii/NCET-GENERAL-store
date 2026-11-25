@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
+import { FileSpreadsheet, FileText, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { download, get } from '../lib/api';
 import { money, qty } from '../lib/format';
 import type { ColType, Report } from '../lib/types';
-import { Button, Card, cx, Empty, ErrorBox, Loading, num, Table, td, th } from './ui';
+import { Badge, Button, Card, cx, Empty, ErrorBox, Loading, num, Table, td, th, wrap } from './ui';
 
 const RIGHT = new Set<ColType>(['money', 'qty', 'int', 'pct']);
 
@@ -21,6 +22,33 @@ function cell(v: unknown, type?: ColType) {
     default:
       return String(v);
   }
+}
+
+// Status words from the API shown as ERP status pills instead of shouting capitals.
+const STATUS_TONE: Record<string, 'teal' | 'amber' | 'rose' | 'neutral'> = {
+  COMPLETED: 'teal',
+  POSTED: 'teal',
+  OK: 'teal',
+  ACTIVE: 'teal',
+  APPROVED: 'teal',
+  CANCELLED: 'rose',
+  NEGATIVE: 'rose',
+  EXPIRED: 'rose',
+  REJECTED: 'rose',
+  LOW: 'amber',
+  REORDER: 'amber',
+  READY: 'amber',
+  PENDING: 'amber',
+  RETURNED: 'amber',
+  EDITED: 'amber',
+  DRAFT: 'neutral',
+  HELD: 'neutral',
+};
+function statusPill(v: unknown) {
+  const s = String(v ?? '');
+  const tone = STATUS_TONE[s.toUpperCase()];
+  if (!tone) return null;
+  return <Badge tone={tone}>{s.charAt(0).toUpperCase() + s.slice(1).toLowerCase().replace(/_/g, ' ')}</Badge>;
 }
 
 /** Renders any report from the API on screen, with one-click PDF and Excel downloads of the same data. */
@@ -54,16 +82,19 @@ export function ReportView({ path, formats = ['pdf', 'xlsx'], onRowClick }: { pa
         </div>
         <div className="flex gap-2">
           {formats.includes('pdf') && (
-            <Button busy={busy === 'pdf'} onClick={() => void dl('pdf')}>
+            <Button variant="pdf" busy={busy === 'pdf'} onClick={() => void dl('pdf')}>
+              {busy !== 'pdf' && <FileText aria-hidden />}
               Download PDF
             </Button>
           )}
           {formats.includes('xlsx') && (
-            <Button busy={busy === 'xlsx'} onClick={() => void dl('xlsx')}>
+            <Button variant="excel" busy={busy === 'xlsx'} onClick={() => void dl('xlsx')}>
+              {busy !== 'xlsx' && <FileSpreadsheet aria-hidden />}
               Download Excel
             </Button>
           )}
-          <Button variant="ghost" onClick={() => void q.refetch()}>
+          <Button variant="soft" onClick={() => void q.refetch()} disabled={q.isFetching}>
+            <RefreshCw aria-hidden className={cx(q.isFetching && 'animate-spin')} />
             Refresh
           </Button>
         </div>
@@ -72,14 +103,19 @@ export function ReportView({ path, formats = ['pdf', 'xlsx'], onRowClick }: { pa
       {r.summary && r.summary.length > 0 && (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
           {r.summary.map((s) => (
-            <div key={s.label} className="rounded-2xl bg-gradient-to-b from-[#12224A] to-[#0C1838] px-5 py-4 shadow-[0_18px_40px_-20px_rgba(0,0,0,0.75)]">
-              <div className="text-xs text-ink-mute">{s.label}</div>
-              <div className="font-mono text-lg tabular-nums">{s.type === 'money' ? `₹${money(s.value)}` : cell(s.value, s.type)}</div>
+            <div key={s.label} className="min-w-0 rounded-xl border border-line bg-surface px-5 py-4 shadow-card">
+              <div className="truncate text-xs text-ink-mute" title={s.label}>{s.label}</div>
+              <div className="mt-1 truncate font-mono text-xl font-semibold tabular-nums">{s.type === 'money' ? `₹${money(s.value)}` : cell(s.value, s.type)}</div>
             </div>
           ))}
         </div>
       )}
-      {r.sections.map((sec, si) => (
+      {r.sections.map((sec, si) => {
+        // Free-text columns (flags, reasons, notes) wrap inside a readable width; everything else stays on one line.
+        // Card view: the item / kit / cashier name (key "name") titles each card; otherwise the first column does.
+        const titleKey = sec.columns.some((c) => c.key === 'name') ? 'name' : null;
+        const longCols = new Set(sec.columns.filter((c) => (!c.type || c.type === 'text') && sec.rows.some((row) => String(row[c.key] ?? '').length > 32)).map((c) => c.key));
+        return (
         <Card key={si} title={sec.title}>
           {sec.rows.length === 0 ? (
             <Empty>No records for this period.</Empty>
@@ -97,9 +133,13 @@ export function ReportView({ path, formats = ['pdf', 'xlsx'], onRowClick }: { pa
               <tbody>
                 {sec.rows.map((row, ri) => (
                   <tr key={ri} className={cx(onRowClick && 'cursor-pointer hover:bg-paper', row.flag === 'NEGATIVE' || row.status === 'NEGATIVE' ? 'bg-rose-50/60' : row.flag === 'REORDER' || row.status === 'LOW' ? 'bg-amber-50/60' : '')} onClick={() => onRowClick?.(row)}>
-                    {sec.columns.map((c) => (
-                      <td key={c.key} className={cx(td, c.type && RIGHT.has(c.type) && num)}>
-                        {cell(row[c.key], c.type)}
+                    {sec.columns.map((c, ci) => (
+                      <td
+                        key={c.key}
+                        data-title={titleKey && c.key === titleKey && ci > 0 ? '' : undefined}
+                        className={cx(td, c.type && RIGHT.has(c.type) && num, longCols.has(c.key) && wrap, ci === 0 && 'font-medium')}
+                      >
+                        {c.key === 'status' || c.key === 'flag' ? (statusPill(row[c.key]) ?? cell(row[c.key], c.type)) : cell(row[c.key], c.type)}
                       </td>
                     ))}
                   </tr>
@@ -107,7 +147,7 @@ export function ReportView({ path, formats = ['pdf', 'xlsx'], onRowClick }: { pa
               </tbody>
               {sec.totals && (
                 <tfoot>
-                  <tr className="bg-navy-50/60 font-semibold">
+                  <tr className="bg-brand-50 font-semibold">
                     {sec.columns.map((c) => (
                       <td key={c.key} className={cx(td, c.type && RIGHT.has(c.type) && num)}>
                         {cell(sec.totals![c.key], c.type)}
@@ -120,7 +160,8 @@ export function ReportView({ path, formats = ['pdf', 'xlsx'], onRowClick }: { pa
           )}
           {sec.note && <p className="border-t border-line px-4 py-2 text-xs text-ink-mute">{sec.note}</p>}
         </Card>
-      ))}
+        );
+      })}
     </div>
   );
 }

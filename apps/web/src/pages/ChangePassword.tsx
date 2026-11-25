@@ -61,8 +61,8 @@ export function ChangePassword({ forced }: { forced?: boolean }) {
   if (forced) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-page p-4">
-        <div className="w-full max-w-sm rounded-2xl border-t-4 border-brand-500 bg-surface shadow-2xl">
-          <h1 className="px-5 pb-1 pt-4 text-lg font-semibold text-white">Set your password</h1>
+        <div className="w-full max-w-sm animate-pop-in rounded-xl border border-line bg-surface shadow-card">
+          <h1 className="px-5 pb-1 pt-5 text-xl font-semibold tracking-tight text-ink">Set your password</h1>
           {form}
         </div>
       </div>

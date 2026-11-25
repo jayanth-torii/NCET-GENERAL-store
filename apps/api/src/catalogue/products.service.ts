@@ -1,10 +1,11 @@
+import { withTx } from '../prisma/prisma.service';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { MovementKind, Prisma, Role } from '@prisma/client';
 import ExcelJS from 'exceljs';
 import { z } from 'zod';
 import { SessionUser } from '../auth/auth.decorators';
 import { AuditService } from '../common/audit.service';
-import { D } from '../common/money';
+import { D, num } from '../common/money';
 import { SettingsService } from '../common/settings.service';
 import { applyMovements } from '../common/stock-ledger';
 import { zGst, zMoney, zOptText, zQty, zRate4 } from '../common/validate';
@@ -56,13 +57,13 @@ export class ProductsService {
   ) {}
 
   private async assertNameFree(name: string, exceptId?: number) {
-    const rows = await this.prisma.$queryRaw<{ id: number; code: string; name: string }[]>`
-      SELECT id, code, name FROM product
-      WHERE is_active AND lower(regexp_replace(trim(name), '\\s+', ' ', 'g')) = ${nameKey(name)}
-      ${exceptId ? Prisma.sql`AND id <> ${exceptId}` : Prisma.empty}
-      LIMIT 1`;
-    if (rows.length) {
-      throw new ConflictException({ message: `"${rows[0].name}" already exists as product code ${rows[0].code}`, code: 'DUPLICATE_NAME', existingId: rows[0].id });
+    // name_key = lower-case, single-spaced name (kept by the Prisma client); unique among active products.
+    const hit = await this.prisma.product.findFirst({
+      where: { isActive: true, nameKey: nameKey(name), ...(exceptId ? { id: { not: exceptId } } : {}) },
+      select: { id: true, code: true, name: true },
+    });
+    if (hit) {
+      throw new ConflictException({ message: `"${hit.name}" already exists as product code ${hit.code}`, code: 'DUPLICATE_NAME', existingId: hit.id });
     }
   }
 
@@ -79,9 +80,11 @@ export class ProductsService {
   }
 
   private async nextCode(tx: Prisma.TransactionClient): Promise<string> {
-    const rows = await tx.$queryRaw<{ max: number | null }[]>`
-      SELECT max(code::bigint) AS max FROM product WHERE code ~ '^[0-9]{1,12}$'`;
-    return String(Number(rows[0]?.max ?? 0) + 1);
+    // Highest all-digit code + 1 (legacy item codes are numbers; codes like "PHY-REC" are skipped).
+    const codes = await tx.product.findMany({ select: { code: true } });
+    let max = 0;
+    for (const { code } of codes) if (/^[0-9]{1,12}$/.test(code)) max = Math.max(max, Number(code));
+    return String(max + 1);
   }
 
   async create(input: ProductInputT, user: SessionUser) {
@@ -98,7 +101,7 @@ export class ProductsService {
     const settings = await this.settings.get();
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        return await this.prisma.$transaction(async (tx) => {
+        return await withTx(this.prisma, async (tx) => {
           const code = input.code?.trim() || (await this.nextCode(tx));
           const product = await tx.product.create({
             data: {
@@ -108,13 +111,13 @@ export class ProductsService {
               categoryId: input.categoryId,
               unitId: input.unitId,
               packUnitId: input.packUnitId ?? null,
-              packSize: D(input.packSize),
+              packSize: num(input.packSize),
               hsnCode: input.hsnCode?.trim() || null,
-              gstRate: D(input.gstRate),
-              mrp: input.mrp === null || input.mrp === undefined ? null : D(input.mrp),
-              salePrice: D(input.salePrice),
-              lastCost: input.openingCost !== undefined ? D(input.openingCost) : null,
-              reorderLevel: D(input.reorderLevel),
+              gstRate: num(input.gstRate),
+              mrp: input.mrp === null || input.mrp === undefined ? null : num(input.mrp),
+              salePrice: num(input.salePrice),
+              lastCost: input.openingCost !== undefined ? num(input.openingCost) : null,
+              reorderLevel: num(input.reorderLevel),
               rackNo: input.rackNo ?? null,
             },
           });
@@ -160,7 +163,7 @@ export class ProductsService {
     }
 
     // Pack size changes are safe: past purchase lines keep their own pack-size snapshot.
-    return this.prisma.$transaction(async (tx) => {
+    return withTx(this.prisma, async (tx) => {
       const after = await tx.product.update({
         where: { id },
         data: {
@@ -170,12 +173,12 @@ export class ProductsService {
           categoryId: input.categoryId,
           unitId: input.unitId,
           packUnitId: input.packUnitId ?? null,
-          packSize: D(input.packSize),
+          packSize: num(input.packSize),
           hsnCode: input.hsnCode?.trim() || null,
-          gstRate: D(input.gstRate),
-          mrp: input.mrp === null || input.mrp === undefined ? null : D(input.mrp),
-          salePrice: D(input.salePrice),
-          reorderLevel: D(input.reorderLevel),
+          gstRate: num(input.gstRate),
+          mrp: input.mrp === null || input.mrp === undefined ? null : num(input.mrp),
+          salePrice: num(input.salePrice),
+          reorderLevel: num(input.reorderLevel),
           rackNo: input.rackNo ?? null,
         },
       });
@@ -254,13 +257,23 @@ export class ProductsService {
 
   /** Top 24 best sellers of the last 30 days for the quick-keys grid. */
   async quickKeys() {
-    const rows = await this.prisma.$queryRaw<{ product_id: number; qty: Prisma.Decimal }[]>`
-      SELECT si.product_id, sum(si.qty) AS qty
-      FROM sale_item si JOIN sale s ON s.id = si.sale_id JOIN product p ON p.id = si.product_id
-      WHERE s.status = 'COMPLETED' AND si.product_id IS NOT NULL AND p.is_active
-        AND s.billed_at >= now() - interval '30 days'
-      GROUP BY si.product_id ORDER BY qty DESC LIMIT 24`;
-    let ids = rows.map((r) => r.product_id);
+    // MongoDB aggregation: completed bills of the last 30 days → their lines → quantity per product.
+    const since = new Date(Date.now() - 30 * 86400000);
+    const agg = (await this.prisma.sale.aggregateRaw({
+      pipeline: [
+        { $match: { status: 'COMPLETED', billed_at: { $gte: { $date: since.toISOString() } } } },
+        { $lookup: { from: 'sale_item', localField: '_id', foreignField: 'sale_id', as: 'it' } },
+        { $unwind: '$it' },
+        { $match: { 'it.product_id': { $ne: null } } },
+        { $group: { _id: '$it.product_id', qty: { $sum: '$it.qty' } } },
+        { $sort: { qty: -1 } },
+        { $limit: 80 },
+      ],
+    })) as unknown as { _id: number; qty: number }[];
+    const active = new Set(
+      (await this.prisma.product.findMany({ where: { id: { in: agg.map((r) => Number(r._id)) }, isActive: true }, select: { id: true } })).map((p) => p.id),
+    );
+    let ids = agg.map((r) => Number(r._id)).filter((id) => active.has(id)).slice(0, 24);
     if (ids.length < 24) {
       const extra = await this.prisma.product.findMany({
         where: { isActive: true, id: { notIn: ids } },
@@ -375,7 +388,7 @@ export class ProductsService {
     if (errors.length) throw new BadRequestException({ message: `${errors.length} row(s) have problems. Nothing was imported.`, errors: errors.slice(0, 200) });
     if (rows.length === 0) throw new BadRequestException('The sheet has no product rows');
 
-    const result = await this.prisma.$transaction(
+    const result = await withTx(this.prisma, 
       async (tx) => {
         let created = 0;
         let updated = 0;
@@ -392,12 +405,12 @@ export class ProductsService {
             categoryId: cat.id,
             unitId: d.unitId,
             packUnitId: d.packUnitId ?? null,
-            packSize: D(d.packSize),
+            packSize: num(d.packSize),
             hsnCode: d.hsnCode || null,
-            gstRate: D(d.gstRate),
-            mrp: d.mrp === null || d.mrp === undefined ? null : D(d.mrp),
-            salePrice: D(d.salePrice),
-            reorderLevel: D(d.reorderLevel),
+            gstRate: num(d.gstRate),
+            mrp: d.mrp === null || d.mrp === undefined ? null : num(d.mrp),
+            salePrice: num(d.salePrice),
+            reorderLevel: num(d.reorderLevel),
             rackNo: d.rackNo ?? null,
           };
           const prev = byCode.get(row.code);

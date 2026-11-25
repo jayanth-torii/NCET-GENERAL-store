@@ -57,6 +57,21 @@ export function inclusiveTax(amount: Dec, gstRate: Dec): Dec {
   return round2(amount.minus(amount.div(gstRate.div(100).plus(1))));
 }
 
+/**
+ * Decimal → number for storing in MongoDB (rounded to 4 dp, so 2-dp money and 3-dp quantities are
+ * stored exactly as computed). Calculations stay in Decimal; only the stored value is a number.
+ */
+export function num(v: Prisma.Decimal.Value): number;
+export function num(v: Prisma.Decimal.Value | null | undefined): number | null;
+export function num(v: Prisma.Decimal.Value | null | undefined): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  return Number(new Decimal(v).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toString());
+}
+
+/** Round a stored/aggregated number (sums of doubles in MongoDB can carry 1e-12 noise). */
+export const r2n = (v: number | Dec | null | undefined) => Number(D(v ?? 0).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toString());
+export const r3n = (v: number | Dec | null | undefined) => Number(D(v ?? 0).toDecimalPlaces(3, Decimal.ROUND_HALF_UP).toString());
+
 export function isMultipleOf(qty: Dec, step: Dec): boolean {
   return qty.mod(step).eq(0);
 }

@@ -1,9 +1,10 @@
+import { withTx } from '../prisma/prisma.service';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { AdjustmentStatus, MovementKind, Prisma, Role } from '@prisma/client';
 import ExcelJS from 'exceljs';
 import { SessionUser } from '../auth/auth.decorators';
 import { AuditService } from '../common/audit.service';
-import { D } from '../common/money';
+import { D, num, r3n } from '../common/money';
 import { SettingsService } from '../common/settings.service';
 import { applyMovements } from '../common/stock-ledger';
 import { istRange } from '../common/time';
@@ -57,40 +58,49 @@ export class StockService {
    */
   async summary(q: { from: string; to: string; categoryId?: number; q?: string; belowReorderOnly?: boolean; includeInactive?: boolean }): Promise<StockRow[]> {
     const { start, end } = istRange(q.from, q.to);
-    const term = q.q?.trim() ? `%${q.q.trim()}%` : null;
-    const rows = await this.prisma.$queryRaw<
-      {
-        id: number; code: string; name: string; category: string; unit: string; is_active: boolean;
-        before: Prisma.Decimal | null; opening_in: Prisma.Decimal | null; purchased: Prisma.Decimal | null; sold: Prisma.Decimal | null;
-        sales_ret: Prisma.Decimal | null; pur_ret: Prisma.Decimal | null; adjust: Prisma.Decimal | null;
-        last_cost: Prisma.Decimal | null; reorder_level: Prisma.Decimal; on_hand: Prisma.Decimal | null;
-      }[]
-    >`
-      WITH mv AS (
-        SELECT product_id,
-          sum(qty) FILTER (WHERE created_at < ${start}) AS before,
-          sum(qty) FILTER (WHERE created_at >= ${start} AND kind = 'OPENING') AS opening_in,
-          sum(qty) FILTER (WHERE created_at >= ${start} AND (kind = 'PURCHASE' OR (kind = 'CANCEL' AND ref_type = 'PURCHASE'))) AS purchased,
-          -sum(qty) FILTER (WHERE created_at >= ${start} AND (kind = 'SALE' OR (kind = 'CANCEL' AND ref_type = 'SALE'))) AS sold,
-          sum(qty) FILTER (WHERE created_at >= ${start} AND kind = 'SALE_RETURN') AS sales_ret,
-          -sum(qty) FILTER (WHERE created_at >= ${start} AND kind = 'PURCHASE_RETURN') AS pur_ret,
-          sum(qty) FILTER (WHERE created_at >= ${start} AND kind = 'ADJUSTMENT') AS adjust
-        FROM stock_movement
-        WHERE created_at < ${end}
-        GROUP BY product_id
-      )
-      SELECT p.id, p.code, p.name, c.name AS category, u.code AS unit, p.is_active,
-             mv.before, mv.opening_in, mv.purchased, mv.sold, mv.sales_ret, mv.pur_ret, mv.adjust,
-             p.last_cost, p.reorder_level, ps.on_hand
-      FROM product p
-      JOIN category c ON c.id = p.category_id
-      JOIN unit u ON u.id = p.unit_id
-      LEFT JOIN mv ON mv.product_id = p.id
-      LEFT JOIN product_stock ps ON ps.product_id = p.id
-      WHERE (p.is_active OR mv.product_id IS NOT NULL ${q.includeInactive ? Prisma.sql`OR TRUE` : Prisma.empty})
-        ${q.categoryId ? Prisma.sql`AND p.category_id = ${q.categoryId}` : Prisma.empty}
-        ${term ? Prisma.sql`AND (p.name ILIKE ${term} OR p.code ILIKE ${term} OR p.barcode = ${q.q!.trim()})` : Prisma.empty}
-      ORDER BY c.name, p.name`;
+    const term = q.q?.trim().toLowerCase() || null;
+    // One MongoDB $group over the ledger up to the end date, splitting each product's movements into the
+    // legacy Stock Summary columns (same buckets as the PostgreSQL FILTER clauses).
+    const at = (d: Date) => ({ $date: d.toISOString() });
+    const inRange = { $gte: ['$created_at', at(start)] };
+    const bucket = (cond: Prisma.InputJsonValue, sign = 1): Prisma.InputJsonObject => ({ $sum: { $cond: [cond, sign === 1 ? '$qty' : { $multiply: ['$qty', -1] }, 0] } });
+    const kindIs = (k: string) => ({ $eq: ['$kind', k] });
+    const cancelOf = (ref: string) => ({ $and: [kindIs('CANCEL'), { $eq: ['$ref_type', ref] }] });
+    const mv = (await this.prisma.stockMovement.aggregateRaw({
+      pipeline: [
+        { $match: { created_at: { $lt: at(end) } } },
+        {
+          $group: {
+            _id: '$product_id',
+            before: bucket({ $lt: ['$created_at', at(start)] }),
+            opening_in: bucket({ $and: [inRange, kindIs('OPENING')] }),
+            purchased: bucket({ $and: [inRange, { $or: [kindIs('PURCHASE'), cancelOf('PURCHASE')] }] }),
+            sold: bucket({ $and: [inRange, { $or: [kindIs('SALE'), cancelOf('SALE')] }] }, -1),
+            sales_ret: bucket({ $and: [inRange, kindIs('SALE_RETURN')] }),
+            pur_ret: bucket({ $and: [inRange, kindIs('PURCHASE_RETURN')] }, -1),
+            adjust: bucket({ $and: [inRange, kindIs('ADJUSTMENT')] }),
+          },
+        },
+      ],
+    })) as unknown as { _id: number; before: number; opening_in: number; purchased: number; sold: number; sales_ret: number; pur_ret: number; adjust: number }[];
+    const byProduct = new Map(mv.map((m) => [Number(m._id), m]));
+    const products = await this.prisma.product.findMany({
+      where: q.categoryId ? { categoryId: q.categoryId } : {},
+      include: { category: { select: { name: true } }, unit: { select: { code: true } }, stock: { select: { onHand: true } } },
+    });
+    const rows = products
+      .filter((p) => p.isActive || byProduct.has(p.id) || q.includeInactive)
+      .filter((p) => !term || p.name.toLowerCase().includes(term) || p.code.toLowerCase().includes(term) || p.barcode === q.q!.trim())
+      .sort((a, b) => a.category.name.localeCompare(b.category.name, 'en', { sensitivity: 'base' }) || a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }))
+      .map((p) => {
+        const m = byProduct.get(p.id);
+        return {
+          id: p.id, code: p.code, name: p.name, category: p.category.name, unit: p.unit.code, is_active: p.isActive,
+          before: r3n(m?.before), opening_in: r3n(m?.opening_in), purchased: r3n(m?.purchased), sold: r3n(m?.sold),
+          sales_ret: r3n(m?.sales_ret), pur_ret: r3n(m?.pur_ret), adjust: r3n(m?.adjust),
+          last_cost: p.lastCost, reorder_level: p.reorderLevel, on_hand: p.stock?.onHand ?? 0,
+        };
+      });
 
     const out = rows.map((r) => {
       const opening = D(r.before).plus(D(r.opening_in));
@@ -127,12 +137,14 @@ export class StockService {
 
   /** Items at or below their reorder level, and items below zero (R8). */
   async lowAndNegative() {
-    const rows = await this.prisma.$queryRaw<{ id: number; code: string; name: string; category: string; unit: string; on_hand: Prisma.Decimal; reorder_level: Prisma.Decimal; rack_no: string | null }[]>`
-      SELECT p.id, p.code, p.name, c.name AS category, u.code AS unit, coalesce(ps.on_hand, 0) AS on_hand, p.reorder_level, p.rack_no
-      FROM product p JOIN category c ON c.id = p.category_id JOIN unit u ON u.id = p.unit_id
-      LEFT JOIN product_stock ps ON ps.product_id = p.id
-      WHERE p.is_active AND (coalesce(ps.on_hand, 0) < 0 OR (p.reorder_level > 0 AND coalesce(ps.on_hand, 0) <= p.reorder_level))
-      ORDER BY coalesce(ps.on_hand, 0) < 0 DESC, p.name`;
+    const products = await this.prisma.product.findMany({
+      where: { isActive: true },
+      include: { category: { select: { name: true } }, unit: { select: { code: true } }, stock: { select: { onHand: true } } },
+    });
+    const rows = products
+      .map((p) => ({ id: p.id, code: p.code, name: p.name, category: p.category.name, unit: p.unit.code, on_hand: p.stock?.onHand ?? 0, reorder_level: p.reorderLevel, rack_no: p.rackNo }))
+      .filter((r) => r.on_hand < 0 || (r.reorder_level > 0 && r.on_hand <= r.reorder_level))
+      .sort((a, b) => Number(b.on_hand < 0) - Number(a.on_hand < 0) || a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
     return rows.map((r) => ({
       productId: r.id, code: r.code, name: r.name, category: r.category, unit: r.unit, rackNo: r.rack_no,
       onHand: Number(r.on_hand), reorderLevel: Number(r.reorder_level), status: Number(r.on_hand) < 0 ? 'NEGATIVE' : 'LOW',
@@ -142,13 +154,17 @@ export class StockService {
 
   /** Items holding stock that have not sold for `days` days. */
   async deadStock(days: number) {
-    const rows = await this.prisma.$queryRaw<{ id: number; code: string; name: string; category: string; on_hand: Prisma.Decimal; last_cost: Prisma.Decimal | null; last_sale: Date | null }[]>`
-      SELECT p.id, p.code, p.name, c.name AS category, ps.on_hand, p.last_cost,
-             (SELECT max(created_at) FROM stock_movement m WHERE m.product_id = p.id AND m.kind = 'SALE') AS last_sale
-      FROM product p JOIN category c ON c.id = p.category_id JOIN product_stock ps ON ps.product_id = p.id
-      WHERE p.is_active AND ps.on_hand > 0
-        AND NOT EXISTS (SELECT 1 FROM stock_movement m WHERE m.product_id = p.id AND m.kind = 'SALE' AND m.created_at >= now() - make_interval(days => ${days}))
-      ORDER BY p.name`;
+    const since = new Date(Date.now() - days * 86400000);
+    const [products, lastSales] = await Promise.all([
+      this.prisma.product.findMany({ where: { isActive: true, stock: { is: { onHand: { gt: 0 } } } }, include: { category: { select: { name: true } }, stock: { select: { onHand: true } } } }),
+      this.prisma.stockMovement.groupBy({ by: ['productId'], where: { kind: 'SALE' }, _max: { createdAt: true } }),
+    ]);
+    const lastSaleOf = new Map(lastSales.map((l) => [l.productId, l._max.createdAt]));
+    const rows = products
+      .filter((p) => (p.stock?.onHand ?? 0) > 0)
+      .map((p) => ({ id: p.id, code: p.code, name: p.name, category: p.category.name, on_hand: p.stock?.onHand ?? 0, last_cost: p.lastCost, last_sale: lastSaleOf.get(p.id) ?? null }))
+      .filter((r) => !r.last_sale || r.last_sale < since)
+      .sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
     return rows.map((r) => ({
       productId: r.id, code: r.code, name: r.name, category: r.category, onHand: Number(r.on_hand),
       value: Number(D(r.on_hand).mul(D(r.last_cost)).toDecimalPlaces(2)), lastSale: r.last_sale,
@@ -161,19 +177,30 @@ export class StockService {
     if (!product) throw new NotFoundException('Product not found');
     const { start, end } = istRange(from, to);
     const openingAgg = await this.prisma.stockMovement.aggregate({ where: { productId, createdAt: { lt: start } }, _sum: { qty: true } });
-    const rows = await this.prisma.$queryRaw<{ id: bigint; kind: string; qty: Prisma.Decimal; unit_cost: Prisma.Decimal | null; ref_type: string; ref_id: bigint; note: string | null; created_at: Date; user_name: string | null; doc_no: string | null }[]>`
-      SELECT m.id, m.kind::text AS kind, m.qty, m.unit_cost, m.ref_type, m.ref_id, m.note, m.created_at, u.full_name AS user_name,
-        CASE m.ref_type
-          WHEN 'SALE' THEN (SELECT bill_no FROM sale WHERE id = m.ref_id)
-          WHEN 'PURCHASE' THEN (SELECT coalesce(purchase_no, 'Draft') FROM purchase WHERE id = m.ref_id)
-          WHEN 'SALES_RETURN' THEN (SELECT return_no FROM sales_return WHERE id = m.ref_id)
-          WHEN 'PURCHASE_RETURN' THEN (SELECT return_no FROM purchase_return WHERE id = m.ref_id)
-          WHEN 'ADJUSTMENT' THEN 'ADJ-' || m.ref_id
-          ELSE 'Opening'
-        END AS doc_no
-      FROM stock_movement m LEFT JOIN app_user u ON u.id = m.created_by
-      WHERE m.product_id = ${productId} AND m.created_at >= ${start} AND m.created_at < ${end}
-      ORDER BY m.created_at, m.id`;
+    const moves = await this.prisma.stockMovement.findMany({
+      where: { productId, createdAt: { gte: start, lt: end } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: { createdBy: { select: { fullName: true } } },
+    });
+    // Document numbers for the ledger lines, looked up in one query per document type.
+    const idsOf = (t: string) => [...new Set(moves.filter((m) => m.refType === t).map((m) => m.refId))];
+    const [sales, purchases, sReturns, pReturns] = await Promise.all([
+      this.prisma.sale.findMany({ where: { id: { in: idsOf('SALE') } }, select: { id: true, billNo: true } }),
+      this.prisma.purchase.findMany({ where: { id: { in: idsOf('PURCHASE').map(Number) } }, select: { id: true, purchaseNo: true } }),
+      this.prisma.salesReturn.findMany({ where: { id: { in: idsOf('SALES_RETURN').map(Number) } }, select: { id: true, returnNo: true } }),
+      this.prisma.purchaseReturn.findMany({ where: { id: { in: idsOf('PURCHASE_RETURN').map(Number) } }, select: { id: true, returnNo: true } }),
+    ]);
+    const doc = new Map<string, string>([
+      ...sales.map((s) => [`SALE:${s.id}`, s.billNo] as [string, string]),
+      ...purchases.map((p) => [`PURCHASE:${p.id}`, p.purchaseNo ?? 'Draft'] as [string, string]),
+      ...sReturns.map((r) => [`SALES_RETURN:${r.id}`, r.returnNo] as [string, string]),
+      ...pReturns.map((r) => [`PURCHASE_RETURN:${r.id}`, r.returnNo] as [string, string]),
+    ]);
+    const rows = moves.map((m) => ({
+      id: m.id, kind: m.kind as string, qty: m.qty, unit_cost: m.unitCost, ref_type: m.refType, ref_id: m.refId, note: m.note, created_at: m.createdAt,
+      user_name: m.createdBy?.fullName ?? null,
+      doc_no: m.refType === 'ADJUSTMENT' ? `ADJ-${m.refId}` : (doc.get(`${m.refType}:${m.refId}`) ?? (m.refType === 'OPENING' ? 'Opening' : null)),
+    }));
     let bal = D(openingAgg._sum.qty);
     const opening = bal.toNumber();
     const lines = rows.map((r) => {
@@ -197,16 +224,18 @@ export class StockService {
     if (input.qtyChange !== undefined && !product.unit.allowDecimal && !Number.isInteger(input.qtyChange)) throw new BadRequestException(`${product.name} is counted in whole ${product.unit.code}`);
     const direct = MANAGERS.includes(user.role);
     const settings = await this.settings.get();
-    return this.prisma.$transaction(async (tx) => {
-      // The difference from a shelf count is worked out on the locked balance, so a sale in between cannot skew it.
-      const locked = await tx.$queryRaw<{ on_hand: Prisma.Decimal }[]>`SELECT on_hand FROM product_stock WHERE product_id = ${product.id} FOR UPDATE`;
-      const onHand = D(locked[0]?.on_hand ?? 0);
+    return withTx(this.prisma, async (tx) => {
+      // The difference from a shelf count is worked out on the balance read inside this transaction. If a
+      // sale changes it before commit, MongoDB reports a write conflict and withTx re-runs the whole step,
+      // so a sale in between cannot skew it (PostgreSQL did this with SELECT … FOR UPDATE).
+      const bal = await tx.productStock.findUnique({ where: { productId: product.id }, select: { onHand: true } });
+      const onHand = D(bal?.onHand ?? 0);
       const change = input.countedQty !== undefined ? D(input.countedQty).minus(onHand) : D(input.qtyChange ?? 0);
       if (change.isZero()) throw new BadRequestException('The adjustment does not change the stock');
       const adj = await tx.stockAdjustment.create({
         data: {
           productId: product.id,
-          qtyChange: change,
+          qtyChange: num(change),
           reason: input.reason,
           status: direct ? AdjustmentStatus.APPROVED : AdjustmentStatus.PENDING,
           requestedById: user.id,
@@ -225,8 +254,9 @@ export class StockService {
 
   async decideAdjustment(id: number, approve: boolean, note: string | null, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM stock_adjustment WHERE id = ${id} FOR UPDATE`;
+    return withTx(this.prisma, async (tx) => {
+      // Two managers deciding at once both update this document; MongoDB lets one commit and the other is
+      // re-run by withTx, which then sees it is no longer PENDING.
       const adj = await tx.stockAdjustment.findUnique({ where: { id }, include: { product: true } });
       if (!adj) throw new NotFoundException('Adjustment not found');
       if (adj.status !== AdjustmentStatus.PENDING) throw new ConflictException('This adjustment was already decided');
@@ -304,14 +334,14 @@ export class StockService {
     });
     if (errors.length) throw new BadRequestException({ message: `${errors.length} row(s) have problems. Nothing was loaded.`, errors: errors.slice(0, 200) });
     if (rows.length === 0) throw new BadRequestException('The sheet has no rows');
-    return this.prisma.$transaction(
+    return withTx(this.prisma, 
       async (tx) => {
         let changed = 0;
         const changes: { code: string; name: string; before: number; after: number }[] = [];
         for (const r of rows) {
-          if (r.cost) await tx.product.update({ where: { id: r.p.id }, data: { lastCost: r.cost } });
-          const locked = await tx.$queryRaw<{ on_hand: Prisma.Decimal }[]>`SELECT on_hand FROM product_stock WHERE product_id = ${r.p.id} FOR UPDATE`;
-          const before = D(locked[0]?.on_hand ?? 0);
+          if (r.cost) await tx.product.update({ where: { id: r.p.id }, data: { lastCost: num(r.cost) } });
+          const bal = await tx.productStock.findUnique({ where: { productId: r.p.id }, select: { onHand: true } });
+          const before = D(bal?.onHand ?? 0);
           const delta = r.counted.minus(before);
           if (delta.isZero()) continue;
           // First count of a product is its opening stock. Any later count is an approved adjustment,
@@ -319,7 +349,7 @@ export class StockService {
           const hasHistory = (await tx.stockMovement.count({ where: { productId: r.p.id } })) > 0;
           if (hasHistory) {
             const adj = await tx.stockAdjustment.create({
-              data: { productId: r.p.id, qtyChange: delta, reason: 'Physical count sheet', status: AdjustmentStatus.APPROVED, requestedById: user.id, decidedById: user.id, decidedAt: new Date() },
+              data: { productId: r.p.id, qtyChange: num(delta), reason: 'Physical count sheet', status: AdjustmentStatus.APPROVED, requestedById: user.id, decidedById: user.id, decidedAt: new Date() },
             });
             await applyMovements(tx, [{ productId: r.p.id, kind: MovementKind.ADJUSTMENT, qty: delta, unitCost: r.cost ?? r.p.lastCost, refType: 'ADJUSTMENT', refId: adj.id, note: 'Physical count sheet' }], user.id, { blockNegative: false });
           } else {

@@ -6,7 +6,7 @@ import { useAuth } from '../lib/auth';
 import { useCatalogue } from '../lib/catalogue';
 import { dateTime, money, qty, ROLE_LABEL, todayIso } from '../lib/format';
 import type { Category, ChargeType, Counter, Kit, Role, Settings, Supplier, Unit } from '../lib/types';
-import { Badge, Button, Card, Checkbox, ConfirmDialog, cx, Empty, ErrorBox, Field, Input, Loading, Modal, num, PageHeader, Select, Table, Tabs, td, th, useToast } from '../components/ui';
+import { Badge, Button, Card, Checkbox, ConfirmDialog, cx, Empty, ErrorBox, Field, Input, Loading, Modal, num, PageHeader, Select, Table, Tabs, td, th, useToast, wrap } from '../components/ui';
 
 type Tab = 'users' | 'sessions' | 'counters' | 'charges' | 'catalogue' | 'suppliers' | 'kits' | 'settings' | 'audit' | 'golive';
 
@@ -564,8 +564,8 @@ function Kits() {
             {q.data.map((k) => (
               <tr key={k.id}>
                 <td className={cx(td, 'font-mono')}>{k.code}</td>
-                <td className={td}>{k.name}</td>
-                <td className={cx(td, 'text-xs text-ink-mute')}>{k.items.map((i) => `${qty(i.qty)} × ${i.product.name}`).join(', ')}</td>
+                <td className={td} data-title>{k.name}</td>
+                <td className={cx(td, wrap, 'text-xs text-ink-mute')}>{k.items.map((i) => `${qty(i.qty)} × ${i.product.name}`).join(', ')}</td>
                 <td className={cx(td, num)}>{money(k.price)}</td>
                 <td className={td}>{k.isActive ? <Badge tone="teal">Active</Badge> : <Badge>Off</Badge>}</td>
                 <td className={td}>

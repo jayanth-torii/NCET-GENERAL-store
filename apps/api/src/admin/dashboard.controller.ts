@@ -1,6 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { CurrentUser, SessionUser } from '../auth/auth.decorators';
+import { D, r2n, sum } from '../common/money';
 import { istDate, istDayStart, istRange } from '../common/time';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -16,44 +17,52 @@ export class DashboardController {
     const own = user.role === Role.CASHIER;
     const seesSales = user.role !== Role.STORE_KEEPER;
     const seesStock = user.role !== Role.CASHIER;
-    const uf = own ? Prisma.sql`AND s.user_id = ${user.id}` : Prisma.empty;
+    const uf = own ? { userId: user.id } : {};
 
     const out: Record<string, unknown> = { date: today, role: user.role };
 
     if (seesSales) {
-      const [h] = await this.prisma.$queryRaw<{ bills: bigint; net: Prisma.Decimal | null; cancelled: bigint }[]>`
-        SELECT count(*) FILTER (WHERE s.status = 'COMPLETED') AS bills, sum(s.grand_total) FILTER (WHERE s.status = 'COMPLETED') AS net,
-               count(*) FILTER (WHERE s.status = 'CANCELLED') AS cancelled
-        FROM sale s WHERE s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${uf}`;
-      const [ret] = await this.prisma.$queryRaw<{ total: Prisma.Decimal | null }[]>`
-        SELECT sum(total) AS total FROM sales_return s WHERE s.created_at >= ${r.start} AND s.created_at < ${r.end} ${uf}`;
-      const modes = await this.prisma.$queryRaw<{ mode: string; amount: Prisma.Decimal }[]>`
-        SELECT p.mode::text AS mode, sum(p.amount) AS amount FROM sale_payment p JOIN sale s ON s.id = p.sale_id
-        WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${uf} GROUP BY p.mode`;
-      const weekStart = istDayStart(istDate(new Date(Date.now() - 6 * 86400000)));
-      const week = own
+      const todays = await this.prisma.sale.findMany({
+        where: { billedAt: { gte: r.start, lt: r.end }, ...uf },
+        select: { id: true, status: true, grandTotal: true },
+      });
+      const done = todays.filter((s) => s.status === 'COMPLETED');
+      const ret = await this.prisma.salesReturn.aggregate({ where: { createdAt: { gte: r.start, lt: r.end }, ...uf }, _sum: { total: true } });
+      const pays = done.length
+        ? await this.prisma.salePayment.findMany({ where: { saleId: { in: done.map((s) => s.id) } }, select: { mode: true, amount: true } })
+        : [];
+      const weekFrom = istDate(new Date(Date.now() - 6 * 86400000));
+      const days = Array.from({ length: 7 }, (_, i) => istDate(new Date(istDayStart(weekFrom).getTime() + i * 86400000 + 12 * 3600000)));
+      const weekSales = own
         ? []
-        : await this.prisma.$queryRaw<{ day: Date; net: Prisma.Decimal; bills: bigint }[]>`
-            WITH d AS (SELECT generate_series(${istDate(new Date(Date.now() - 6 * 86400000))}::date, ${today}::date, interval '1 day')::date AS day)
-            SELECT d.day, coalesce(sum(s.grand_total), 0) AS net, count(s.id) AS bills
-            FROM d LEFT JOIN sale s ON (s.billed_at AT TIME ZONE 'Asia/Kolkata')::date = d.day AND s.status = 'COMPLETED' AND s.billed_at >= ${weekStart}
-            GROUP BY d.day ORDER BY d.day`;
+        : await this.prisma.sale.findMany({ where: { status: 'COMPLETED', billedAt: { gte: istDayStart(weekFrom), lt: r.end } }, select: { billedAt: true, grandTotal: true } });
+      const byDay = new Map(days.map((d) => [d, { net: D(0), bills: 0 }]));
+      for (const s of weekSales) {
+        const b = byDay.get(istDate(s.billedAt));
+        if (b) {
+          b.net = b.net.plus(s.grandTotal);
+          b.bills++;
+        }
+      }
       out.sales = {
         scope: own ? 'own' : 'store',
-        bills: Number(h.bills),
-        net: Number(h.net ?? 0),
-        returns: Number(ret.total ?? 0),
-        cancelled: Number(h.cancelled),
-        byMode: Object.fromEntries(['CASH', 'UPI', 'CARD'].map((m) => [m, Number(modes.find((x) => x.mode === m)?.amount ?? 0)])),
-        week: week.map((w) => ({ date: w.day.toISOString().slice(0, 10), net: Number(w.net), bills: Number(w.bills) })),
+        bills: done.length,
+        net: r2n(sum(done.map((s) => D(s.grandTotal)))),
+        returns: r2n(ret._sum.total ?? 0),
+        cancelled: todays.length - done.length,
+        byMode: Object.fromEntries(['CASH', 'UPI', 'CARD'].map((m) => [m, r2n(sum(pays.filter((p) => p.mode === m).map((p) => D(p.amount))))])),
+        week: own ? [] : days.map((d) => ({ date: d, net: r2n(byDay.get(d)!.net), bills: byDay.get(d)!.bills })),
       };
     }
 
     if (seesStock) {
-      const [s] = await this.prisma.$queryRaw<{ low: bigint; negative: bigint }[]>`
-        SELECT count(*) FILTER (WHERE p.reorder_level > 0 AND coalesce(ps.on_hand, 0) <= p.reorder_level AND coalesce(ps.on_hand, 0) >= 0) AS low,
-               count(*) FILTER (WHERE coalesce(ps.on_hand, 0) < 0) AS negative
-        FROM product p LEFT JOIN product_stock ps ON ps.product_id = p.id WHERE p.is_active`;
+      const prods = await this.prisma.product.findMany({ where: { isActive: true }, select: { reorderLevel: true, stock: { select: { onHand: true } } } });
+      const s = { low: 0, negative: 0 };
+      for (const p of prods) {
+        const on = p.stock?.onHand ?? 0;
+        if (on < 0) s.negative++;
+        else if (p.reorderLevel > 0 && on <= p.reorderLevel) s.low++;
+      }
       const [pendingAdjustments, draftPurchases, readyPurchases, alerts] = await Promise.all([
         this.prisma.stockAdjustment.count({ where: { status: 'PENDING' } }),
         this.prisma.purchase.count({ where: { status: 'DRAFT' } }),

@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
-import { FormEvent, useState } from 'react';
+import { BadgePercent, IndianRupee, Ruler, Tag, Warehouse } from 'lucide-react';
+import { FormEvent, ReactNode, useState } from 'react';
 import { get, patch, post } from '../lib/api';
 import { MANAGE, useAuth } from '../lib/auth';
 import type { Category, Product, Unit } from '../lib/types';
-import { Button, ErrorBox, Field, Input, Select } from './ui';
+import { Button, cx, ErrorBox, Field, Input, Select } from './ui';
 
 type FormState = Record<string, string>;
 
@@ -71,9 +72,32 @@ export function ProductForm({ product, initialName, onSaved, onCancel }: { produ
     }
   };
 
+  // Live price check shown under the prices.
+  const sp = Number(f.salePrice);
+  const mrp = f.mrp.trim() === '' ? null : Number(f.mrp);
+  const cost = product?.lastCost !== null && product?.lastCost !== undefined ? Number(product.lastCost) : f.openingCost.trim() ? Number(f.openingCost) : null;
+  const priceNote: { tone: 'ok' | 'warn' | 'bad'; text: string } | null =
+    f.salePrice.trim() === '' || !(sp > 0)
+      ? null
+      : mrp !== null && sp > mrp
+        ? { tone: 'bad', text: `Sale price is above the MRP (₹${mrp}). It will be refused.` }
+        : {
+            tone: cost !== null && cost >= sp ? 'warn' : 'ok',
+            text: [mrp !== null && mrp > 0 ? `${(((mrp - sp) / mrp) * 100).toFixed(1)}% below MRP` : null, cost !== null ? `margin ${(((sp - cost) / sp) * 100).toFixed(1)}% on last cost ₹${cost}` : null, Number(f.gstRate) > 0 ? `includes GST ₹${(sp - sp / (1 + Number(f.gstRate) / 100)).toFixed(2)}` : 'no GST'].filter(Boolean).join(' · '),
+          };
+
+  const section = (icon: ReactNode, title: string, hint: string) => (
+    <div className="col-span-full -mb-1 mt-2 flex items-center gap-2 border-b border-line pb-2 first:mt-0">
+      <span className="flex size-7 items-center justify-center rounded-lg bg-brand-500/10 text-brand-600 [&_svg]:h-4 [&_svg]:w-4">{icon}</span>
+      <span className="text-sm font-semibold">{title}</span>
+      <span className="ml-auto hidden text-xs text-ink-mute sm:inline">{hint}</span>
+    </div>
+  );
+
   return (
     <form onSubmit={submit} className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
+        {section(<Tag />, 'Basics', 'How staff find it at the counter')}
         <Field label="Name" className="sm:col-span-2" hint="The system blocks a second product with the same name.">
           {(id) => <Input id={id} value={f.name} onChange={set('name')} required maxLength={120} autoFocus />}
         </Field>
@@ -93,6 +117,8 @@ export function ProductForm({ product, initialName, onSaved, onCancel }: { produ
             </Select>
           )}
         </Field>
+        <div className="hidden sm:block" />
+        {section(<Ruler />, 'Units & packing', 'Boxes from the supplier, pieces at the counter')}
         <Field label="Selling unit">
           {(id) => (
             <Select id={id} value={f.unitId} onChange={set('unitId')} required>
@@ -118,6 +144,7 @@ export function ProductForm({ product, initialName, onSaved, onCancel }: { produ
           )}
         </Field>
         <Field label="Selling units per pack">{(id) => <Input id={id} inputMode="decimal" value={f.packSize} onChange={set('packSize')} disabled={!f.packUnitId} className="font-mono" />}</Field>
+        {section(<IndianRupee />, 'Price & tax', 'Sale price includes GST')}
         <Field label="MRP ₹" hint={priceLocked ? 'Only a manager can change prices' : undefined}>
           {(id) => <Input id={id} inputMode="decimal" value={f.mrp} onChange={set('mrp')} disabled={priceLocked} className="font-mono" />}
         </Field>
@@ -136,6 +163,18 @@ export function ProductForm({ product, initialName, onSaved, onCancel }: { produ
             </Select>
           )}
         </Field>
+        {priceNote && (
+          <div
+            className={cx(
+              'col-span-full flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium',
+              priceNote.tone === 'bad' ? 'border-rose-600/25 bg-rose-50 text-rose-700' : priceNote.tone === 'warn' ? 'border-amber-600/25 bg-amber-50 text-amber-700' : 'border-leaf-600/20 bg-leaf-50 text-leaf-700',
+            )}
+          >
+            <BadgePercent className="h-4 w-4 shrink-0" aria-hidden />
+            {priceNote.text}
+          </div>
+        )}
+        {section(<Warehouse />, 'Stock', 'Shelf place and reorder alert')}
         <Field label="Reorder level" hint="Flag when stock falls to this">
           {(id) => <Input id={id} inputMode="decimal" value={f.reorderLevel} onChange={set('reorderLevel')} className="font-mono" />}
         </Field>

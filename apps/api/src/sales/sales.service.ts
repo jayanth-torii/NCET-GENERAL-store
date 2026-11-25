@@ -1,11 +1,13 @@
+import { withTx } from '../prisma/prisma.service';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { MovementKind, PaymentMode, Prisma, Role, SaleStatus, StoreSetting } from '@prisma/client';
 import { z } from 'zod';
 import { SessionUser } from '../auth/auth.decorators';
 import { AuditService } from '../common/audit.service';
 import { nextBillNo, nextDocNo } from '../common/doc-number';
-import { D, Dec, round2, sum } from '../common/money';
+import { D, Dec, num, round2, sum } from '../common/money';
 import { SettingsService } from '../common/settings.service';
+import { holdKeys } from '../common/keyed-lock';
 import { applyMovements, Movement, StockWarning } from '../common/stock-ledger';
 import { istDate, istRange, isSameIstDay } from '../common/time';
 import { zMoney, zOptText, zQty, zReason } from '../common/validate';
@@ -175,14 +177,16 @@ export class SalesService {
 
   /**
    * A UPI or card transaction can pay for one bill only. Inside the transaction, so two counters
-   * claiming the same transaction ID at the same moment are serialised by an advisory lock.
+   * claiming the same transaction ID at the same moment are serialised: both write the reference's claim
+   * document, MongoDB lets one commit, and withTx re-runs the other, which then finds the reference used.
    * Cancelled bills do not count: a mistaken bill can be cancelled and re-billed on the same payment.
    */
   private async assertReferencesUnused(tx: Tx, applied: { mode: PaymentMode; reference: string | null }[], exceptSaleId?: bigint) {
     for (const p of applied) {
       if (!p.reference || p.mode === PaymentMode.CASH) continue;
       const key = `${p.mode}:${p.reference.toUpperCase()}`;
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+      await holdKeys([`ref:${key}`]);
+      await tx.docCounter.upsert({ where: { key: `REF:${key}` }, create: { key: `REF:${key}`, value: 1 }, update: { value: { increment: 1 } } });
       const clash = await tx.salePayment.findFirst({
         where: { mode: p.mode, reference: { equals: p.reference, mode: 'insensitive' }, sale: { status: SaleStatus.COMPLETED, ...(exceptSaleId ? { id: { not: exceptSaleId } } : {}) } },
         include: { sale: { select: { billNo: true } } },
@@ -198,15 +202,15 @@ export class SalesService {
       kitId: l.kitId,
       codeSnapshot: l.code,
       nameSnapshot: l.name,
-      qty: l.qty,
-      rate: l.rate,
-      masterRate: l.masterRate,
-      discount: totals.lines[i].discount,
-      gstRate: l.gstRate,
-      taxAmount: totals.lines[i].tax,
-      lineTotal: totals.lines[i].lineTotal,
-      costAtSale: l.unitCost,
-      components: l.components.length ? { create: l.components.map((c) => ({ productId: c.productId, qtyPerKit: c.qtyPerKit, gstRate: c.gstRate, unitCost: c.unitCost })) } : undefined,
+      qty: num(l.qty),
+      rate: num(l.rate),
+      masterRate: num(l.masterRate),
+      discount: num(totals.lines[i].discount),
+      gstRate: num(l.gstRate),
+      taxAmount: num(totals.lines[i].tax),
+      lineTotal: num(totals.lines[i].lineTotal),
+      costAtSale: num(l.unitCost),
+      components: l.components.length ? { create: l.components.map((c) => ({ productId: c.productId, qtyPerKit: num(c.qtyPerKit), gstRate: num(c.gstRate), unitCost: num(c.unitCost) })) } : undefined,
     }));
   }
 
@@ -228,7 +232,7 @@ export class SalesService {
 
     let warnings: StockWarning[] = [];
     try {
-      const sale = await this.prisma.$transaction(
+      const sale = await withTx(this.prisma, 
         async (tx) => {
           await this.assertReferencesUnused(tx, settlement.applied);
           const billNo = await nextBillNo(tx, user.counterCode!);
@@ -237,19 +241,19 @@ export class SalesService {
               billNo,
               counterId: user.counterId!,
               userId: user.id,
-              itemsTotal: totals.itemsTotal,
-              discountTotal: totals.discountTotal,
-              taxTotal: totals.taxTotal,
-              roundOff: totals.roundOff,
-              grandTotal: totals.grandTotal,
-              tendered: settlement.tendered,
-              changeDue: settlement.changeDue,
+              itemsTotal: num(totals.itemsTotal),
+              discountTotal: num(totals.discountTotal),
+              taxTotal: num(totals.taxTotal),
+              roundOff: num(totals.roundOff),
+              grandTotal: num(totals.grandTotal),
+              tendered: num(settlement.tendered),
+              changeDue: num(settlement.changeDue),
               idempotencyKey,
               customerName: input.customerName ?? null,
               remarks: input.remarks ?? null,
               priceOverride,
               items: { create: this.itemCreates(lines, totals) },
-              payments: { create: settlement.applied.map((p) => ({ mode: p.mode, amount: p.amount, reference: p.reference })) },
+              payments: { create: settlement.applied.map((p) => ({ mode: p.mode, amount: num(p.amount), reference: p.reference })) },
             },
           });
           if (priceOverride) {
@@ -289,9 +293,17 @@ export class SalesService {
     return { id: sale.id, billNo: sale.billNo, grandTotal: sale.grandTotal, changeDue: sale.changeDue, receiptUrl: `/api/v1/sales/${sale.id}/receipt?format=html`, warnings: [], replayed: true };
   }
 
-  /** Lock a bill row for the rest of the transaction and check it can still be changed. */
+  /**
+   * Claim a bill for the rest of the transaction (MongoDB has no SELECT … FOR UPDATE): bumping row_version
+   * makes any other transaction writing the same bill conflict, and withTx re-runs it against the new state.
+   */
+  private async claimSale(tx: Tx, id: bigint) {
+    await tx.sale.updateMany({ where: { id }, data: { rowVersion: { increment: 1 } } });
+  }
+
+  /** Claim a bill for the rest of the transaction and check it can still be changed. */
   private async lockForChange(tx: Tx, id: bigint, what: string) {
-    await tx.$queryRaw`SELECT id FROM sale WHERE id = ${id} FOR UPDATE`;
+    await this.claimSale(tx, id);
     const sale = await tx.sale.findUnique({ where: { id }, include: { items: { include: { components: true } }, payments: true, returns: true } });
     if (!sale) throw new NotFoundException('Bill not found');
     if (sale.status !== SaleStatus.COMPLETED) throw new ConflictException(`This bill is already cancelled and cannot be ${what}`);
@@ -316,7 +328,7 @@ export class SalesService {
     const { totals, settlement } = this.compute(lines, input.payments, settings);
     const priceOverride = this.overrideCheck(lines, input.remarks);
     let warnings: StockWarning[] = [];
-    await this.prisma.$transaction(
+    await withTx(this.prisma, 
       async (tx) => {
         const before = await this.lockForChange(tx, id, 'edited');
         await this.assertReferencesUnused(tx, settlement.applied, id);
@@ -326,20 +338,20 @@ export class SalesService {
         const after = await tx.sale.update({
           where: { id },
           data: {
-            itemsTotal: totals.itemsTotal,
-            discountTotal: totals.discountTotal,
-            taxTotal: totals.taxTotal,
-            roundOff: totals.roundOff,
-            grandTotal: totals.grandTotal,
-            tendered: settlement.tendered,
-            changeDue: settlement.changeDue,
+            itemsTotal: num(totals.itemsTotal),
+            discountTotal: num(totals.discountTotal),
+            taxTotal: num(totals.taxTotal),
+            roundOff: num(totals.roundOff),
+            grandTotal: num(totals.grandTotal),
+            tendered: num(settlement.tendered),
+            changeDue: num(settlement.changeDue),
             customerName: input.customerName ?? before.customerName,
             remarks: input.remarks ?? before.remarks,
             priceOverride,
             editedAt: new Date(),
             editCount: { increment: 1 },
             items: { create: this.itemCreates(lines, totals) },
-            payments: { create: settlement.applied.map((p) => ({ mode: p.mode, amount: p.amount, reference: p.reference })) },
+            payments: { create: settlement.applied.map((p) => ({ mode: p.mode, amount: num(p.amount), reference: p.reference })) },
           },
           include: { items: true, payments: true },
         });
@@ -356,7 +368,7 @@ export class SalesService {
 
   /** Manager cancel, same day only, with a reason. Stock is put back with reversing movements; nothing is deleted. */
   async cancel(id: bigint, reason: string, user: SessionUser, ip: string) {
-    await this.prisma.$transaction(async (tx) => {
+    await withTx(this.prisma, async (tx) => {
       const sale = await this.lockForChange(tx, id, 'cancelled');
       await applyMovements(tx, this.movementsFor(this.priorLines(sale), 1, MovementKind.CANCEL, 'SALE', id, `Bill cancelled: ${reason}`), user.id, { blockNegative: false });
       await tx.sale.update({ where: { id }, data: { status: SaleStatus.CANCELLED, cancelReason: reason, cancelledById: user.id, cancelledAt: new Date() } });
@@ -368,8 +380,8 @@ export class SalesService {
   /** Sales return against the original bill (FR-13). */
   async createReturn(saleId: bigint, input: z.infer<typeof ReturnInput>, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM sale WHERE id = ${saleId} FOR UPDATE`;
+    return withTx(this.prisma, async (tx) => {
+      await this.claimSale(tx, saleId);
       const sale = await tx.sale.findUnique({
         where: { id: saleId },
         include: { payments: true, items: { include: { components: true, returnLines: true, product: { include: { unit: true } } } } },
@@ -418,7 +430,7 @@ export class SalesService {
 
       const returnNo = await nextDocNo(tx, 'SR');
       const ret = await tx.salesReturn.create({
-        data: { returnNo, saleId, userId: user.id, reason: input.reason, refundMode: input.refundMode, total, items: { create: lines } },
+        data: { returnNo, saleId, userId: user.id, reason: input.reason, refundMode: input.refundMode, total: num(total), items: { create: lines.map((l) => ({ saleItemId: l.saleItemId, qty: num(l.qty), amount: num(l.amount) })) } },
         include: { items: true },
       });
       const warnings = await applyMovements(tx, moves.map((m) => ({ ...m, refId: ret.id })), user.id, { blockNegative: settings.blockNegativeStock });
@@ -474,7 +486,7 @@ export class SalesService {
    */
   async receiptFor(id: bigint, user: SessionUser, ip: string) {
     await this.detail(id, user); // applies the cashier scope
-    const sale = await this.prisma.$transaction(async (tx) => {
+    const sale = await withTx(this.prisma, async (tx) => {
       const s = await tx.sale.update({
         where: { id },
         data: { printCount: { increment: 1 } },

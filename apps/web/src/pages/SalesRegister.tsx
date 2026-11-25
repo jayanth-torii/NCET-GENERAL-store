@@ -6,6 +6,7 @@ import { MANAGE, useAuth } from '../lib/auth';
 import { dateTime, money, qty, todayIso } from '../lib/format';
 import { printReceipt } from '../lib/print';
 import type { Counter } from '../lib/types';
+import { FileSpreadsheet, FileText, Printer } from 'lucide-react';
 import { Badge, Button, Card, ConfirmDialog, cx, Empty, ErrorBox, Field, Input, Loading, Modal, num, PageHeader, Pager, Select, Table, td, th, useToast } from '../components/ui';
 
 interface Row {
@@ -47,8 +48,8 @@ export function SalesRegister() {
         actions={
           isManager && (
             <>
-              <Button onClick={() => download(`/reports/sales/register${qs({ from: f.from, to: f.to, counterId: f.counterId, format: 'pdf' })}`).catch(setDl)}>PDF</Button>
-              <Button onClick={() => download(`/reports/sales/register${qs({ from: f.from, to: f.to, counterId: f.counterId, format: 'xlsx' })}`).catch(setDl)}>Excel</Button>
+              <Button variant="pdf" onClick={() => download(`/reports/sales/register${qs({ from: f.from, to: f.to, counterId: f.counterId, format: 'pdf' })}`).catch(setDl)}><FileText aria-hidden /> PDF</Button>
+              <Button variant="excel" onClick={() => download(`/reports/sales/register${qs({ from: f.from, to: f.to, counterId: f.counterId, format: 'xlsx' })}`).catch(setDl)}><FileSpreadsheet aria-hidden /> Excel</Button>
             </>
           )
         }
@@ -283,9 +284,9 @@ export function BillDetail({ id, onClose }: { id: number; onClose: () => void })
             </div>
           )}
           <div className="flex flex-wrap gap-2 border-t border-line pt-4">
-            <Button onClick={() => printReceipt(s.id).then(() => toast('Sent to printer. Copies are stamped DUPLICATE and logged.')).catch(setErr)}>Reprint</Button>
-            <Button onClick={() => download(`/sales/${s.id}/receipt?format=pdf`).catch(setErr)}>PDF (80 mm)</Button>
-            <Button onClick={() => download(`/sales/${s.id}/receipt?format=pdf&size=a4`).catch(setErr)}>PDF (A4)</Button>
+            <Button variant="soft" onClick={() => printReceipt(s.id).then(() => toast('Sent to printer. Copies are stamped DUPLICATE and logged.')).catch(setErr)}><Printer aria-hidden /> Reprint</Button>
+            <Button variant="pdf" onClick={() => download(`/sales/${s.id}/receipt?format=pdf`).catch(setErr)}><FileText aria-hidden /> PDF (80 mm)</Button>
+            <Button variant="pdf" onClick={() => download(`/sales/${s.id}/receipt?format=pdf&size=a4`).catch(setErr)}><FileText aria-hidden /> PDF (A4)</Button>
             {s.can.edit && (
               <Button variant="warn" onClick={() => nav(`/billing?edit=${s.id}`)}>
                 Edit bill
@@ -373,7 +374,7 @@ function ReturnDialog({ sale, onClose, onDone }: { sale: Detail; onClose: () => 
         </>
       }
     >
-      <Table>
+      <Table cards={false}>
         <thead>
           <tr>
             <th className={th}>Item</th>

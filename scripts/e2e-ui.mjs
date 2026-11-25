@@ -111,7 +111,8 @@ async function main() {
   await search.waitFor({ timeout: 5000 }).then(() => check(true, 'F2 on the dashboard opens Counter sales'), () => check(false, 'F2 on the dashboard opens Counter sales'));
   await page.waitForTimeout(800); // catalogue load
   // An F key with nothing to act on explains itself instead of doing nothing
-  await page.locator('body').click({ position: { x: 5, y: 300 } });
+  // click empty page padding (top-left of <main>) to leave the search box; the sidebar rail sits at x < 48
+  await page.locator('main').click({ position: { x: 4, y: 4 } });
   await page.keyboard.press('F9');
   check(await page.waitForSelector('text=the bill is empty', { timeout: 3000 }).then(() => true, () => false), 'F9 on an empty bill says why it cannot save');
   await page.keyboard.press('F3');
@@ -147,7 +148,8 @@ async function main() {
   await page.keyboard.press('F6');
   await page.getByLabel('Name for this bill').fill(`Waiting ${T}`);
   await page.getByRole('dialog').getByRole('button', { name: 'Hold bill' }).click();
-  await page.waitForTimeout(400);
+  // the hold is saved when its dialog closes (a cloud database takes longer than the old fixed 400 ms)
+  await page.getByRole('dialog').waitFor({ state: 'detached', timeout: 20000 });
   await page.keyboard.press('F7');
   await page.waitForSelector(`text=Waiting ${T}`);
   await page.getByRole('dialog').locator('li', { hasText: `Waiting ${T}` }).getByRole('button', { name: 'Recall', exact: true }).click();
@@ -240,6 +242,8 @@ async function main() {
   await k.waitForSelector('text=draft purchase');
   check(/^GRN\/\d{2}-\d{2}\/\d{4}/.test(await k.locator('h1').first().innerText()), 'GRN number shown as soon as the bill is saved');
   await k.getByLabel('Add item').fill(s.product.code);
+  // wait for the search result, as a person would, before pressing Enter
+  await k.locator('ul button', { hasText: s.product.name }).first().waitFor({ timeout: 20000 });
   await k.getByLabel('Add item').press('Enter');
   await k.getByLabel('Quantity').fill('10');
   await k.getByLabel('Rate', { exact: true }).fill('25');

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApiError, del, get, patch, post } from '../lib/api';
 import { MANAGE, useAuth } from '../lib/auth';
@@ -8,8 +8,47 @@ import { money, qty as fmtQty, r2 } from '../lib/format';
 import { billingKey } from '../lib/keys';
 import { printReceipt } from '../lib/print';
 import type { CatalogueItem, Kit, Settings, StockWarning } from '../lib/types';
-import { Badge, Button, ConfirmDialog, cx, ErrorBox, Field, Input, Kbd, Modal, num, Table, td, th, useToast } from '../components/ui';
+import { Avatar, Badge, Button, ConfirmDialog, cx, ErrorBox, Field, Input, Kbd, Modal, num, Table, td, th, useToast } from '../components/ui';
 import { UpiQrDialog } from '../components/UpiQrDialog';
+import {
+  Banknote,
+  CheckCircle2,
+  ChevronDown,
+  CreditCard,
+  Eraser,
+  Flame,
+  History,
+  Keyboard,
+  Minus,
+  Package,
+  Pause,
+  Plus,
+  Printer,
+  QrCode,
+  Save,
+  ScanBarcode,
+  ShoppingBag,
+  Smartphone,
+  Trash2,
+  UserRound,
+} from 'lucide-react';
+
+/** Small icon button with its shortcut, used for Save / Hold / Recall / Clear under the main button. */
+function ActionTile({ icon, label, k, onClick, disabled, busy }: { icon: ReactNode; label: string; k: string; onClick: () => void; disabled?: boolean; busy?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || busy}
+      title={`${label} (${k})`}
+      className="flex h-9 items-center justify-center gap-1.5 rounded-lg border border-line bg-paper px-1 text-xs font-medium text-ink transition-all hover:-translate-y-0.5 hover:border-brand-500/50 hover:shadow-lift active:scale-[0.97] disabled:pointer-events-none disabled:opacity-45"
+    >
+      <span className="text-brand-600">{icon}</span>
+      {label}
+      <span className="font-mono text-[10px] text-ink-mute">{k}</span>
+    </button>
+  );
+}
 
 interface Line {
   key: string;
@@ -86,6 +125,7 @@ export function Billing() {
   const [clearOpen, setClearOpen] = useState(false);
   const [editLoaded, setEditLoaded] = useState<string | null>(null);
   const [qrOpen, setQrOpen] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const cashRef = useRef<HTMLInputElement>(null);
 
@@ -424,291 +464,484 @@ export function Billing() {
   const maxPct = Number(settings.data?.maxCashierDiscount ?? 0);
   const canDiscount = isManager || maxPct > 0;
 
+  // How many of each product / kit are already on the bill (shown on the tiles).
+  const inBill = new Map<string, number>();
+  for (const l of draft.lines) {
+    const k = l.kitId ? `k${l.kitId}` : `p${l.productId}`;
+    inBill.set(k, (inBill.get(k) ?? 0) + l.qty);
+  }
+  const hasSplit = splitOpen || totals.upi > 0 || totals.card > 0 || !!draft.upiRef || !!draft.cardRef;
+  const cashEntered = draft.cash.trim() !== '';
+
   return (
-    <div className="grid min-h-[calc(100vh-7.5rem)] gap-3 xl:grid-cols-[minmax(0,1fr)_380px]">
-      {/* Left: search + lines */}
-      <div className="flex min-w-0 flex-col gap-3">
+    <div className="grid gap-3 xl:h-[calc(100svh-5.5rem)] xl:grid-cols-[minmax(0,1fr)_370px]">
+      {/* Left: search + bill + products */}
+      <div className="flex min-h-0 min-w-0 flex-col gap-3">
         {editId && (
-          <div className="flex items-center justify-between rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-600/25 bg-amber-50 px-4 py-2.5 text-sm text-amber-700">
             <span>Editing a saved bill. Saving replaces its lines and payments and is recorded in the audit log.</span>
             <Button size="sm" onClick={clear}>
               Stop editing
             </Button>
           </div>
         )}
-        <div className="relative">
+
+        {/* scanner / search */}
+        <div className="relative shrink-0">
           <label htmlFor="pos-search" className="sr-only">
             Search product
           </label>
+          <ScanBarcode className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-brand-600" aria-hidden />
           <Input
             id="pos-search"
             ref={searchRef}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={onSearchKey}
-            placeholder="Scan barcode, type code or name.  5*123 adds 5 of code 123"
-            className="h-14 font-mono text-lg"
+            placeholder="Scan a barcode, or type a product name or code…"
+            className="h-12 rounded-xl border-2 pl-12 pr-44 text-base shadow-card focus-visible:!border-brand-500 focus-visible:!ring-4 focus-visible:!ring-brand-500/15"
             autoComplete="off"
           />
-          <span className="pointer-events-none absolute right-3 top-4 text-ink-mute">
+          <span className="pointer-events-none absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-2 text-xs text-ink-mute">
+            <span className="hidden rounded-md bg-surface px-2 py-0.5 font-mono lg:inline">5*123 = qty 5</span>
             <Kbd>F2</Kbd>
           </span>
           {search.trim() && hits.length > 0 && (
-            <ul className="absolute left-0 right-0 top-full z-20 mt-1 max-h-96 overflow-auto rounded-md border border-line bg-white shadow-lg" role="listbox">
-              {hits.map((h, i) => (
-                <li
-                  key={h.id}
-                  role="option"
-                  aria-selected={i === hit}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pickFromSearch(h);
-                  }}
-                  className={cx('flex cursor-pointer items-center gap-3 px-3 py-2 text-sm', i === hit ? 'bg-navy-50' : 'hover:bg-paper')}
-                >
-                  <span className="w-16 shrink-0 font-mono text-xs text-ink-mute">{h.code}</span>
-                  <span className="min-w-0 flex-1 truncate">{h.name}</span>
-                  <span className={cx('font-mono text-xs', Number(h.onHand) <= 0 ? 'text-rose-600' : 'text-ink-mute')}>
-                    {fmtQty(h.onHand)} {h.unit}
-                  </span>
-                  <span className="w-20 text-right font-mono">{money(h.salePrice)}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="absolute left-0 right-0 top-full z-30 mt-2 animate-pop-in overflow-hidden rounded-xl border border-line bg-page shadow-pop">
+              <ul className="max-h-80 overflow-auto p-1.5" role="listbox">
+                {hits.map((h, i) => {
+                  const stock = Number(h.onHand);
+                  return (
+                    <li
+                      key={h.id}
+                      role="option"
+                      aria-selected={i === hit}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        pickFromSearch(h);
+                      }}
+                      className={cx('flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-sm transition-colors', i === hit ? 'bg-brand-500/10' : 'hover:bg-ink/[0.04]')}
+                    >
+                      <Avatar name={h.name} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{h.name}</span>
+                        <span className="font-mono text-xs text-ink-mute">{h.code}</span>
+                      </span>
+                      <span className={cx('rounded-md px-2 py-0.5 font-mono text-xs', stock <= 0 ? 'bg-rose-50 text-rose-700' : stock < 10 ? 'bg-amber-50 text-amber-700' : 'bg-leaf-50 text-leaf-700')}>
+                        {fmtQty(h.onHand)} {h.unit}
+                      </span>
+                      <span className="w-24 text-right font-mono font-semibold">₹{money(h.salePrice)}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+              <div className="flex items-center gap-3 border-t border-line bg-surface px-3 py-1.5 text-[11px] text-ink-mute">
+                <span>
+                  <Kbd>↑</Kbd> <Kbd>↓</Kbd> choose
+                </span>
+                <span>
+                  <Kbd>Enter</Kbd> add to bill
+                </span>
+                <span>
+                  <Kbd>Esc</Kbd> clear
+                </span>
+              </div>
+            </div>
           )}
         </div>
 
-        <div className="min-h-[240px] flex-1 overflow-hidden rounded-lg border border-line bg-white">
-          <Table>
-            <thead>
-              <tr>
-                <th className={th}>#</th>
-                <th className={th}>Item</th>
-                <th className={cx(th, 'text-right')}>Qty</th>
-                <th className={cx(th, 'text-right')}>Rate</th>
-                {canDiscount && <th className={cx(th, 'text-right')}>Disc ₹</th>}
-                <th className={cx(th, 'text-right')}>Amount</th>
-                <th className={th}>
-                  <span className="sr-only">Remove</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {draft.lines.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="p-10 text-center text-sm text-ink-mute">
-                    Scan or search an item, or tap a quick key. <Kbd>F4</Kbd> switches between best sellers and section kits.
-                  </td>
-                </tr>
-              )}
-              {draft.lines.map((l, i) => {
-                const amount = r2(l.qty * l.rate - l.discount);
-                const low = l.onHand !== undefined && l.onHand - l.qty < 0;
-                return (
-                  <tr key={l.key} onClick={() => setSel(i)} className={cx(sel === i && 'bg-navy-50/70')}>
-                    <td className={cx(td, 'w-8 text-ink-mute')}>{i + 1}</td>
-                    <td className={td}>
-                      <div className="font-medium">{l.name}</div>
-                      <div className="flex flex-wrap items-center gap-2 font-mono text-xs text-ink-mute">
-                        {l.code}
-                        {l.kitId && <Badge tone="teal">Kit</Badge>}
-                        {low && <Badge tone="amber">Stock {fmtQty(l.onHand)}</Badge>}
-                        {l.rate !== l.masterRate && <Badge tone="amber">Price changed</Badge>}
-                      </div>
-                    </td>
-                    <td className={cx(td, 'w-24')}>
-                      <Input
-                        aria-label={`Quantity of ${l.name}`}
-                        inputMode="decimal"
-                        className="h-9 text-right font-mono"
-                        value={String(l.qty)}
-                        onChange={(e) => {
-                          const v = n(e.target.value);
-                          if (!Number.isNaN(v) && v >= 0) setLine(i, { qty: l.allowDecimal ? Math.round(v * 1000) / 1000 : Math.round(v) });
-                        }}
-                        onBlur={() => l.qty <= 0 && removeLine(i)}
-                      />
-                    </td>
-                    <td className={cx(td, 'w-28')}>
-                      {isManager ? (
-                        <Input
-                          aria-label={`Rate of ${l.name}`}
-                          inputMode="decimal"
-                          className="h-9 text-right font-mono"
-                          value={String(l.rate)}
-                          onChange={(e) => {
-                            const v = n(e.target.value);
-                            if (!Number.isNaN(v) && v >= 0) setLine(i, { rate: r2(v) });
-                          }}
-                        />
-                      ) : (
-                        <div className={num}>{money(l.rate)}</div>
-                      )}
-                    </td>
-                    {canDiscount && (
-                      <td className={cx(td, 'w-24')}>
-                        <Input
-                          aria-label={`Discount on ${l.name}`}
-                          inputMode="decimal"
-                          className="h-9 text-right font-mono"
-                          value={l.discount ? String(l.discount) : ''}
-                          placeholder="0"
-                          onChange={(e) => {
-                            const v = e.target.value.trim() === '' ? 0 : n(e.target.value);
-                            if (!Number.isNaN(v) && v >= 0) setLine(i, { discount: r2(v) });
-                          }}
-                        />
-                      </td>
-                    )}
-                    <td className={cx(td, num, 'w-28 text-base')}>{money(amount)}</td>
-                    <td className={cx(td, 'w-10')}>
-                      <button className="rounded px-2 py-1 text-ink-mute hover:bg-rose-50 hover:text-rose-700" onClick={() => removeLine(i)} aria-label={`Remove ${l.name}`} title="Remove line (F8)">
-                        ✕
-                      </button>
-                    </td>
+        {/* the bill */}
+        <div className="flex min-h-[260px] flex-1 flex-col overflow-hidden rounded-xl border border-line bg-paper shadow-card">
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+            <div className="flex items-center gap-2">
+              <ShoppingBag className="h-4 w-4 text-brand-600" aria-hidden />
+              <span className="text-sm font-semibold">Current bill</span>
+              {draft.lines.length > 0 && <span className="rounded-full bg-main px-2 py-0.5 text-[11px] font-semibold text-main-fg">{draft.lines.length}</span>}
+            </div>
+            {draft.lines.length > 0 && (
+              <span className="hidden text-xs text-ink-mute sm:inline">
+                Click a line to select it · <Kbd>F8</Kbd> removes it
+              </span>
+            )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {draft.lines.length === 0 ? (
+              <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 p-8 text-center">
+                <span className="relative flex size-16 items-center justify-center rounded-2xl bg-brand-500/10 text-brand-600">
+                  <span className="absolute inset-0 animate-ping rounded-2xl bg-brand-500/10 [animation-duration:2.4s]" />
+                  <ScanBarcode className="h-8 w-8" aria-hidden />
+                </span>
+                <div>
+                  <p className="text-base font-semibold">Ready for the next customer</p>
+                  <p className="mt-1 text-sm text-ink-mute">
+                    Scan or search an item, or tap a product below. <Kbd>F4</Kbd> switches between best sellers and section kits.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <Table cards={false}>
+                <thead>
+                  <tr>
+                    <th className={cx(th, 'w-10')}>#</th>
+                    <th className={th}>Item</th>
+                    <th className={cx(th, 'text-center')}>Qty</th>
+                    <th className={cx(th, 'text-right')}>Rate</th>
+                    {canDiscount && <th className={cx(th, 'text-right')}>Disc ₹</th>}
+                    <th className={cx(th, 'text-right')}>Amount</th>
+                    <th className={th}>
+                      <span className="sr-only">Remove</span>
+                    </th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </Table>
+                </thead>
+                <tbody>
+                  {draft.lines.map((l, i) => {
+                    const amount = r2(l.qty * l.rate - l.discount);
+                    const low = l.onHand !== undefined && l.onHand - l.qty < 0;
+                    const step = (dq: number) => {
+                      const q = r2(l.qty + dq);
+                      if (q <= 0) removeLine(i);
+                      else setLine(i, { qty: q });
+                    };
+                    return (
+                      <tr key={l.key} onClick={() => setSel(i)} className={cx('animate-row-in cursor-pointer', sel === i && '!bg-brand-500/[0.07] shadow-[inset_3px_0_0_rgb(var(--brand-500))]')}>
+                        <td className={cx(td, 'w-10')}>
+                          <span className={cx('inline-flex size-6 items-center justify-center rounded-full text-[11px] font-semibold', sel === i ? 'bg-main text-main-fg' : 'bg-surface text-ink-mute')}>{i + 1}</span>
+                        </td>
+                        <td className={cx(td, '!whitespace-normal')}>
+                          <div className="font-medium leading-snug">{l.name}</div>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 font-mono text-xs text-ink-mute">
+                            {l.code}
+                            {l.kitId && <Badge tone="teal">Kit</Badge>}
+                            {low && <Badge tone="amber">Stock {fmtQty(l.onHand)}</Badge>}
+                            {l.rate !== l.masterRate && <Badge tone="amber">Price changed</Badge>}
+                          </div>
+                        </td>
+                        <td className={cx(td, 'w-36')}>
+                          <div className="mx-auto flex w-fit items-center overflow-hidden rounded-lg border border-line bg-paper shadow-sm">
+                            <button type="button" tabIndex={-1} onClick={(e) => (e.stopPropagation(), step(-1))} className="flex h-9 w-8 items-center justify-center text-ink-mute transition-colors hover:bg-ink/[0.06] hover:text-ink" aria-label={`One less ${l.name}`}>
+                              <Minus className="h-3.5 w-3.5" />
+                            </button>
+                            <input
+                              aria-label={`Quantity of ${l.name}`}
+                              inputMode="decimal"
+                              className="h-9 w-14 border-x border-line bg-transparent text-center font-mono text-sm font-semibold outline-none focus:bg-brand-500/5"
+                              value={String(l.qty)}
+                              onChange={(e) => {
+                                const v = n(e.target.value);
+                                if (!Number.isNaN(v) && v >= 0) setLine(i, { qty: l.allowDecimal ? Math.round(v * 1000) / 1000 : Math.round(v) });
+                              }}
+                              onBlur={() => l.qty <= 0 && removeLine(i)}
+                            />
+                            <button type="button" tabIndex={-1} onClick={(e) => (e.stopPropagation(), step(1))} className="flex h-9 w-8 items-center justify-center text-ink-mute transition-colors hover:bg-ink/[0.06] hover:text-ink" aria-label={`One more ${l.name}`}>
+                              <Plus className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                        <td className={cx(td, 'w-28')}>
+                          {isManager ? (
+                            <Input
+                              aria-label={`Rate of ${l.name}`}
+                              inputMode="decimal"
+                              className="h-9 text-right font-mono"
+                              value={String(l.rate)}
+                              onChange={(e) => {
+                                const v = n(e.target.value);
+                                if (!Number.isNaN(v) && v >= 0) setLine(i, { rate: r2(v) });
+                              }}
+                            />
+                          ) : (
+                            <div className={num}>{money(l.rate)}</div>
+                          )}
+                        </td>
+                        {canDiscount && (
+                          <td className={cx(td, 'w-24')}>
+                            <Input
+                              aria-label={`Discount on ${l.name}`}
+                              inputMode="decimal"
+                              className="h-9 text-right font-mono"
+                              value={l.discount ? String(l.discount) : ''}
+                              placeholder="0"
+                              onChange={(e) => {
+                                const v = e.target.value.trim() === '' ? 0 : n(e.target.value);
+                                if (!Number.isNaN(v) && v >= 0) setLine(i, { discount: r2(v) });
+                              }}
+                            />
+                          </td>
+                        )}
+                        <td className={cx(td, num, 'w-28')}>
+                          <span key={amount} className="inline-block animate-bump text-base font-semibold">
+                            {money(amount)}
+                          </span>
+                        </td>
+                        <td className={cx(td, 'w-10')}>
+                          <button
+                            className="rounded-md p-1.5 text-ink-mute transition-colors hover:bg-rose-50 hover:text-rose-700"
+                            onClick={(e) => (e.stopPropagation(), removeLine(i))}
+                            aria-label={`Remove ${l.name}`}
+                            title="Remove line (F8)"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </Table>
+            )}
+          </div>
         </div>
 
-        {/* Quick keys / kits */}
-        <div className="rounded-lg border border-line bg-white p-3">
-          <div className="mb-2 flex items-center gap-2">
-            <button className={cx('rounded px-2 py-1 text-sm font-medium', panel === 'quick' ? 'bg-navy-50 text-navy-700' : 'text-ink-mute')} onClick={() => setPanel('quick')}>
-              Best sellers
-            </button>
-            <button className={cx('rounded px-2 py-1 text-sm font-medium', panel === 'kits' ? 'bg-navy-50 text-navy-700' : 'text-ink-mute')} onClick={() => setPanel('kits')}>
-              Section kits
-            </button>
+        {/* Product tiles: best sellers / section kits */}
+        <div className="shrink-0 rounded-xl border border-line bg-surface p-3 shadow-card">
+          <div className="mb-2.5 flex items-center gap-2">
+            <div className="inline-flex rounded-lg border border-line bg-paper p-0.5">
+              <button
+                className={cx('inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors', panel === 'quick' ? 'bg-main text-main-fg shadow-sm' : 'text-ink-mute hover:text-ink')}
+                onClick={() => setPanel('quick')}
+              >
+                <Flame className="h-3.5 w-3.5" aria-hidden />
+                Best sellers
+              </button>
+              <button
+                className={cx('inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors', panel === 'kits' ? 'bg-main text-main-fg shadow-sm' : 'text-ink-mute hover:text-ink')}
+                onClick={() => setPanel('kits')}
+              >
+                <Package className="h-3.5 w-3.5" aria-hidden />
+                Section kits
+              </button>
+            </div>
             <span className="ml-auto text-xs text-ink-mute">
               <Kbd>F4</Kbd> switch
             </span>
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+          <div className="grid max-h-[9.75rem] grid-cols-2 gap-2 overflow-y-auto p-0.5 sm:grid-cols-3 lg:grid-cols-4 2xl:max-h-[12rem] 2xl:grid-cols-6">
             {panel === 'quick' &&
-              quickItems.map((p) => (
-                <button key={p.id} onClick={() => addProduct(p)} className="min-h-[56px] rounded-md border border-line bg-paper/60 px-2 py-1.5 text-left text-xs leading-tight hover:border-navy-500 hover:bg-navy-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-navy-500">
-                  <span className="line-clamp-2 font-medium">{p.name}</span>
-                  <span className="mt-0.5 block font-mono text-ink-mute">₹{money(p.salePrice)}</span>
-                </button>
-              ))}
+              quickItems.map((p) => {
+                const count = inBill.get(`p${p.id}`) ?? 0;
+                const stock = Number(p.onHand);
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => addProduct(p)}
+                    className={cx(
+                      'group relative flex min-h-[64px] items-center gap-2.5 rounded-lg border bg-paper px-2.5 py-2 text-left transition-all hover:-translate-y-0.5 hover:border-brand-500/50 hover:shadow-lift active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50',
+                      count > 0 ? 'border-brand-500/60 bg-brand-500/[0.05]' : 'border-line',
+                    )}
+                  >
+                    <Avatar name={p.name} />
+                    <span className="min-w-0 flex-1">
+                      <span className="line-clamp-2 text-xs font-medium leading-tight">{p.name}</span>
+                      <span className="mt-0.5 flex items-center gap-1.5 font-mono text-xs text-ink-mute">
+                        ₹{money(p.salePrice)}
+                        <span className={cx('size-1.5 rounded-full', stock <= 0 ? 'bg-rose-500' : stock < 10 ? 'bg-amber-500' : 'bg-leaf-500')} title={`${fmtQty(p.onHand)} in stock`} />
+                      </span>
+                    </span>
+                    {count > 0 && <span className="absolute right-1.5 top-1.5 flex h-5 min-w-5 animate-bump items-center justify-center rounded-full bg-main px-1 text-[11px] font-bold text-main-fg shadow">{fmtQty(count)}</span>}
+                  </button>
+                );
+              })}
             {panel === 'kits' &&
               (kits.data?.length ? (
-                kits.data.map((k) => (
-                  <button key={k.id} onClick={() => addKit(k)} className="min-h-[56px] rounded-md border border-navy-100 bg-navy-50/60 px-2 py-1.5 text-left text-xs leading-tight hover:border-navy-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-navy-500" title={k.items.map((i) => `${i.qty} x ${i.product.name}`).join('\n')}>
-                    <span className="line-clamp-2 font-medium">{k.name}</span>
-                    <span className="mt-0.5 block font-mono text-ink-mute">
-                      ₹{money(k.price)} · {k.items.length} items
-                    </span>
-                  </button>
-                ))
+                kits.data.map((k) => {
+                  const count = inBill.get(`k${k.id}`) ?? 0;
+                  return (
+                    <button
+                      key={k.id}
+                      onClick={() => addKit(k)}
+                      className={cx(
+                        'relative flex min-h-[64px] items-center gap-2.5 rounded-lg border bg-paper px-2.5 py-2 text-left transition-all hover:-translate-y-0.5 hover:border-brand-500/50 hover:shadow-lift active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50',
+                        count > 0 ? 'border-brand-500/60 bg-brand-500/[0.05]' : 'border-line',
+                      )}
+                      title={k.items.map((i) => `${i.qty} x ${i.product.name}`).join('\n')}
+                    >
+                      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-leaf-50 text-leaf-700">
+                        <Package className="h-4 w-4" aria-hidden />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="line-clamp-2 text-xs font-medium leading-tight">{k.name}</span>
+                        <span className="mt-0.5 block font-mono text-xs text-ink-mute">
+                          ₹{money(k.price)} · {k.items.length} items
+                        </span>
+                      </span>
+                      {count > 0 && <span className="absolute right-1.5 top-1.5 flex h-5 min-w-5 animate-bump items-center justify-center rounded-full bg-main px-1 text-[11px] font-bold text-main-fg shadow">{count}</span>}
+                    </button>
+                  );
+                })
               ) : (
-                <p className="col-span-full text-sm text-ink-mute">No section kits yet. A manager can add them under Masters → Section kits.</p>
+                <p className="col-span-full py-4 text-center text-sm text-ink-mute">No section kits yet. A manager can add them under Masters → Section kits.</p>
               ))}
           </div>
         </div>
       </div>
 
-      {/* Right: totals and payment */}
-      <aside className="flex min-w-0 flex-col gap-3">
-        <div className="rounded-lg border border-line bg-white">
-          <div className="border-b border-line px-4 py-3">
-            <div className="text-xs font-medium uppercase tracking-wide text-ink-mute">Bill total</div>
-            <div className="font-mono text-5xl font-medium tabular-nums tracking-tight">₹{money(totals.grand)}</div>
-            <div className="mt-1 flex flex-wrap gap-x-4 font-mono text-xs text-ink-mute">
-              <span>
+      {/* Right: checkout */}
+      <aside className="flex min-h-0 min-w-0 flex-col gap-3 xl:overflow-y-auto xl:pr-0.5">
+        <div className="shrink-0 overflow-hidden rounded-xl border border-line bg-paper shadow-card">
+          {/* total */}
+          <div className="relative overflow-hidden bg-gradient-to-br from-brand-700 via-brand-800 to-brand-950 px-5 py-3 text-white">
+            <div className="pointer-events-none absolute -right-10 -top-16 h-40 w-40 rounded-full bg-brand-400/25 blur-2xl" />
+            <div className="relative flex items-center justify-between">
+              <span className="text-xs font-medium uppercase tracking-wider text-white/70">Bill total</span>
+              <span className="rounded-md bg-white/10 px-2 py-0.5 font-mono text-[11px] text-white/80">{me.counterCode}</span>
+            </div>
+            <div key={totals.grand} className="relative mt-1 animate-bump origin-left font-mono text-5xl font-semibold tabular-nums tracking-tight">
+              ₹{money(totals.grand)}
+            </div>
+            <div className="relative mt-2 flex flex-wrap gap-1.5 text-[11px]">
+              <span className="rounded-md bg-white/10 px-2 py-0.5">
                 {draft.lines.length} {draft.lines.length === 1 ? 'line' : 'lines'}
               </span>
-              <span>Qty {fmtQty(totals.items)}</span>
-              {totals.discount > 0 && <span>Disc −{money(totals.discount)}</span>}
-              {totals.roundOff !== 0 && <span>R/off {money(totals.roundOff)}</span>}
+              <span className="rounded-md bg-white/10 px-2 py-0.5">Qty {fmtQty(totals.items)}</span>
+              {totals.discount > 0 && <span className="rounded-md bg-white/10 px-2 py-0.5">Disc −{money(totals.discount)}</span>}
+              {totals.roundOff !== 0 && <span className="rounded-md bg-white/10 px-2 py-0.5">R/off {money(totals.roundOff)}</span>}
             </div>
           </div>
-          <div className="space-y-3 p-4">
-            <Field label="Cash received" hint="Leave empty if the customer pays the exact amount.">
-              {(id) => <Input id={id} ref={cashRef} inputMode="decimal" className="h-12 text-right font-mono text-xl" value={draft.cash} placeholder={money(Math.max(0, totals.grand - totals.upi - totals.card))} onChange={(e) => update((d) => ({ ...d, cash: e.target.value }))} onKeyDown={(e) => e.key === 'Enter' && void save(true)} />}
+
+          <div className="space-y-2.5 p-4">
+            {/* cash */}
+            <Field label="Cash received">
+              {(id) => (
+                <div className="relative">
+                  <Banknote className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-leaf-600" aria-hidden />
+                  <Input
+                    id={id}
+                    ref={cashRef}
+                    inputMode="decimal"
+                    className="h-11 pl-11 text-right font-mono text-xl font-semibold"
+                    value={draft.cash}
+                    placeholder={money(Math.max(0, totals.grand - totals.upi - totals.card))}
+                    onChange={(e) => update((d) => ({ ...d, cash: e.target.value }))}
+                    onKeyDown={(e) => e.key === 'Enter' && void save(true)}
+                  />
+                </div>
+              )}
             </Field>
             <div className="flex flex-wrap gap-1.5">
               {[totals.grand, 50, 100, 200, 500, 2000]
                 .filter((v, i, a) => v > 0 && a.indexOf(v) === i && (i === 0 || v >= totals.grand))
                 .slice(0, 5)
                 .map((v, i) => (
-                  <Button key={v} size="sm" onClick={() => update((d) => ({ ...d, cash: String(v) }))}>
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => update((d) => ({ ...d, cash: String(v) }))}
+                    className={cx(
+                      'h-8 rounded-full border px-3 text-xs font-semibold transition-colors',
+                      cashEntered && n(draft.cash) === v ? 'border-transparent bg-main text-main-fg' : 'border-line bg-paper text-ink hover:border-brand-500/50 hover:bg-brand-500/5',
+                    )}
+                  >
                     {i === 0 ? 'Exact' : `₹${v}`}
-                  </Button>
+                  </button>
                 ))}
+              {draft.lines.length === 0 && <span className="text-xs text-ink-mute">Leave empty if the customer pays the exact amount.</span>}
             </div>
-            <Button variant="secondary" className="w-full border-brand-500/60 text-brand-500" disabled={!draft.lines.length || totals.grand - totals.card <= 0} onClick={() => setQrOpen(true)}>
-              Collect by UPI · show QR <Kbd>F3</Kbd>
-            </Button>
-            <div className="grid grid-cols-[1fr_1fr] gap-2">
-              <Field label="UPI">{(id) => <Input id={id} inputMode="decimal" className="text-right font-mono" value={draft.upi} onChange={(e) => update((d) => ({ ...d, upi: e.target.value }))} placeholder="0.00" />}</Field>
-              <Field label={settings.data?.requireUpiReference ? 'UPI transaction ID' : 'UPI ref'}>
-                {(id) => <Input id={id} value={draft.upiRef} onChange={(e) => update((d) => ({ ...d, upiRef: e.target.value.toUpperCase() }))} placeholder={settings.data?.requireUpiReference ? 'required' : 'optional'} maxLength={32} className="font-mono" invalid={totals.upi > 0 && !!settings.data?.requireUpiReference && !draft.upiRef.trim()} />}
-              </Field>
-              <Field label="Card">{(id) => <Input id={id} inputMode="decimal" className="text-right font-mono" value={draft.card} onChange={(e) => update((d) => ({ ...d, card: e.target.value }))} placeholder="0.00" />}</Field>
-              <Field label={settings.data?.requireCardReference ? 'Card slip ID' : 'Card ref'}>
-                {(id) => <Input id={id} value={draft.cardRef} onChange={(e) => update((d) => ({ ...d, cardRef: e.target.value.toUpperCase() }))} placeholder={settings.data?.requireCardReference ? 'required' : 'optional'} maxLength={32} className="font-mono" />}
-              </Field>
+
+            {/* UPI QR */}
+            <button
+              type="button"
+              disabled={!draft.lines.length || totals.grand - totals.card <= 0}
+              onClick={() => setQrOpen(true)}
+              className="group flex w-full items-center gap-3 rounded-lg border border-dashed border-brand-500/50 bg-brand-500/[0.04] px-3 py-2 text-left transition-colors hover:border-solid hover:bg-brand-500/10 disabled:pointer-events-none disabled:opacity-50 [&>span:first-child]:size-8"
+            >
+              <span className="flex size-9 items-center justify-center rounded-lg bg-main text-main-fg">
+                <QrCode className="h-4 w-4" aria-hidden />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold">Collect by UPI · show QR</span>
+                <span className="block text-xs text-ink-mute">Exact amount, any UPI app</span>
+              </span>
+              <Kbd>F3</Kbd>
+            </button>
+
+            {/* split payment drawer */}
+            <div className="rounded-lg border border-line">
+              <button type="button" onClick={() => setSplitOpen((o) => !o)} className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium" aria-expanded={hasSplit}>
+                <Smartphone className="h-4 w-4 text-brand-600" aria-hidden />
+                <CreditCard className="h-4 w-4 text-brand-600" aria-hidden />
+                UPI / card payment
+                {(totals.upi > 0 || totals.card > 0) && <span className="rounded-md bg-brand-50 px-1.5 py-0.5 font-mono text-[11px] text-brand-700">₹{money(totals.upi + totals.card)}</span>}
+                <ChevronDown className={cx('ml-auto h-4 w-4 text-ink-mute transition-transform', hasSplit && 'rotate-180')} aria-hidden />
+              </button>
+              {hasSplit && (
+                <div className="grid animate-fade-in grid-cols-2 gap-2 border-t border-line p-3">
+                  <Field label="UPI">{(id) => <Input id={id} inputMode="decimal" className="text-right font-mono" value={draft.upi} onChange={(e) => update((d) => ({ ...d, upi: e.target.value }))} placeholder="0.00" />}</Field>
+                  <Field label={settings.data?.requireUpiReference ? 'UPI transaction ID' : 'UPI ref'}>
+                    {(id) => <Input id={id} value={draft.upiRef} onChange={(e) => update((d) => ({ ...d, upiRef: e.target.value.toUpperCase() }))} placeholder={settings.data?.requireUpiReference ? 'required' : 'optional'} maxLength={32} className="font-mono" invalid={totals.upi > 0 && !!settings.data?.requireUpiReference && !draft.upiRef.trim()} />}
+                  </Field>
+                  <Field label="Card">{(id) => <Input id={id} inputMode="decimal" className="text-right font-mono" value={draft.card} onChange={(e) => update((d) => ({ ...d, card: e.target.value }))} placeholder="0.00" />}</Field>
+                  <Field label={settings.data?.requireCardReference ? 'Card slip ID' : 'Card ref'}>
+                    {(id) => <Input id={id} value={draft.cardRef} onChange={(e) => update((d) => ({ ...d, cardRef: e.target.value.toUpperCase() }))} placeholder={settings.data?.requireCardReference ? 'required' : 'optional'} maxLength={32} className="font-mono" />}
+                  </Field>
+                </div>
+              )}
             </div>
-            <div className="flex items-center justify-between rounded-md bg-paper px-3 py-2">
-              <span className="text-sm text-ink-mute">{totals.change >= 0 ? 'Change to give' : 'Still to pay'}</span>
-              <span className={cx('font-mono text-2xl tabular-nums', totals.change < 0 ? 'text-rose-700' : 'text-navy-700')}>₹{money(Math.abs(totals.change))}</span>
+
+            {/* change */}
+            <div
+              className={cx(
+                'flex items-center justify-between rounded-lg px-4 py-2 transition-colors',
+                totals.change < 0 ? 'bg-rose-50 text-rose-700' : draft.lines.length && totals.change > 0 ? 'bg-leaf-50 text-leaf-700' : 'bg-surface text-ink-mute',
+              )}
+            >
+              <span className="text-sm font-medium">{totals.change >= 0 ? 'Change to give' : 'Still to pay'}</span>
+              <span className="font-mono text-2xl font-semibold tabular-nums">₹{money(Math.abs(totals.change))}</span>
             </div>
-            <Field label="Customer (optional)">{(id) => <Input id={id} value={draft.customerName} maxLength={80} onChange={(e) => update((d) => ({ ...d, customerName: e.target.value }))} placeholder="Name or section, e.g. II CSE A" />}</Field>
+
+            <Field label="Customer (optional)">
+              {(id) => (
+                <div className="relative">
+                  <UserRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-mute" aria-hidden />
+                  <Input id={id} className="pl-9" value={draft.customerName} maxLength={80} onChange={(e) => update((d) => ({ ...d, customerName: e.target.value }))} placeholder="Name or section, e.g. II CSE A" />
+                </div>
+              )}
+            </Field>
             {hasOverride && (
               <Field label="Why was the price changed?" hint="Required when a line is billed below its master price. It goes on the audit log and the daily report.">
                 {(id) => <Input id={id} value={draft.remarks} maxLength={200} onChange={(e) => update((d) => ({ ...d, remarks: e.target.value }))} invalid={draft.remarks.trim().length < 3} placeholder="e.g. Damaged cover, approved by HOD" />}
               </Field>
             )}
             <ErrorBox error={err} />
-            <div className="grid grid-cols-[2fr_3fr] gap-2">
-              <Button variant="secondary" size="lg" busy={busy} onClick={() => void save(false)} disabled={!!payProblem}>
-                Save <Kbd>F9</Kbd>
-              </Button>
-              <Button variant="primary" size="lg" busy={busy} onClick={() => void save(true)} disabled={!!payProblem}>
-                Save &amp; print <Kbd>F10</Kbd>
-              </Button>
-            </div>
+
+            {/* actions */}
+            <Button variant="primary" size="lg" className="h-12 w-full text-base shadow-lift" busy={busy} onClick={() => void save(true)} disabled={!!payProblem}>
+              <Printer className="!h-5 !w-5" aria-hidden />
+              Save &amp; print
+              <span className="ml-auto rounded bg-white/15 px-1.5 py-0.5 font-mono text-[11px]">F10</span>
+            </Button>
             {payProblem && draft.lines.length > 0 && <p className="text-xs text-rose-600">{payProblem}</p>}
-            <div className="grid grid-cols-3 gap-2">
-              <Button size="sm" onClick={() => setHoldOpen(true)} disabled={!draft.lines.length || !!editId}>
-                Hold <Kbd>F6</Kbd>
-              </Button>
-              <Button size="sm" onClick={() => setRecallOpen(true)} disabled={!!editId}>
-                Recall <Kbd>F7</Kbd>
-              </Button>
-              <Button size="sm" onClick={() => draft.lines.length && setClearOpen(true)}>
-                Clear <Kbd>Esc</Kbd>
-              </Button>
+            <div className="grid grid-cols-4 gap-1.5">
+              <ActionTile icon={<Save className="h-4 w-4" />} label="Save" k="F9" busy={busy} disabled={!!payProblem} onClick={() => void save(false)} />
+              <ActionTile icon={<Pause className="h-4 w-4" />} label="Hold" k="F6" disabled={!draft.lines.length || !!editId} onClick={() => setHoldOpen(true)} />
+              <ActionTile icon={<History className="h-4 w-4" />} label="Recall" k="F7" disabled={!!editId} onClick={() => setRecallOpen(true)} />
+              <ActionTile icon={<Eraser className="h-4 w-4" />} label="Clear" k="Esc" onClick={() => draft.lines.length && setClearOpen(true)} />
             </div>
           </div>
         </div>
 
         {lastBill && (
-          <div className="rounded-lg border border-line bg-white p-4 text-sm">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-xs uppercase tracking-wide text-ink-mute">Last bill</div>
-                <div className="font-mono">{lastBill.billNo}</div>
+          <div className="shrink-0 animate-pop-in rounded-xl border border-leaf-600/30 bg-leaf-50 p-4 text-sm">
+            <div className="flex items-center gap-3">
+              <CheckCircle2 className="h-6 w-6 shrink-0 text-leaf-600" aria-hidden />
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium uppercase tracking-wide text-leaf-700">Last bill</div>
+                <div className="font-mono font-semibold text-ink">{lastBill.billNo}</div>
               </div>
               <div className="text-right font-mono">
-                <div>₹{money(lastBill.total)}</div>
-                {lastBill.change > 0 && <div className="text-xs text-navy-700">change ₹{money(lastBill.change)}</div>}
+                <div className="font-semibold text-ink">₹{money(lastBill.total)}</div>
+                {lastBill.change > 0 && <div className="text-xs text-leaf-700">change ₹{money(lastBill.change)}</div>}
               </div>
             </div>
-            <div className="mt-2 flex gap-2">
-              <Button size="sm" onClick={() => void reprintLast()}>
-                Reprint <Kbd>Ctrl P</Kbd>
+            <div className="mt-3 flex gap-2">
+              <Button size="sm" variant="soft" onClick={() => void reprintLast()}>
+                <Printer className="h-3.5 w-3.5" aria-hidden /> Reprint <Kbd>Ctrl P</Kbd>
               </Button>
-              <Button size="sm" onClick={() => window.open(`/api/v1/sales/${lastBill.id}/receipt?format=pdf`, '_blank')}>
+              <Button size="sm" variant="pdf" onClick={() => window.open(`/api/v1/sales/${lastBill.id}/receipt?format=pdf`, '_blank')}>
                 PDF
               </Button>
             </div>
             {warnings.length > 0 && (
-              <div className="mt-3 rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              <div className="mt-3 rounded-md border border-amber-600/25 bg-amber-50 px-3 py-2 text-xs text-amber-700">
                 Stock went below zero for: {warnings.map((w) => `${w.name} (${fmtQty(w.onHand)})`).join(', ')}. Enter the pending purchase or tell the store keeper.
               </div>
             )}
@@ -847,8 +1080,13 @@ function KeyHelp() {
     ['Esc', '', 'Clear bill'],
   ];
   return (
-    <div className="hidden rounded-lg border border-line bg-white p-3 text-xs text-ink-mute xl:block">
-      <div className="grid grid-cols-1 gap-y-1">
+    <details className="group hidden shrink-0 rounded-xl border border-line bg-paper text-xs text-ink-mute shadow-card xl:block">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-sm font-medium text-ink [&::-webkit-details-marker]:hidden">
+        <Keyboard className="h-4 w-4 text-brand-600" aria-hidden />
+        Keyboard shortcuts
+        <ChevronDown className="ml-auto h-4 w-4 text-ink-mute transition-transform group-open:rotate-180" aria-hidden />
+      </summary>
+      <div className="grid grid-cols-1 gap-y-1 border-t border-line px-4 pb-3 pt-2">
         {keys.map(([k, alt, v]) => (
           <div key={k} className="flex items-center justify-between gap-2">
             <span className="flex gap-1">
@@ -864,9 +1102,9 @@ function KeyHelp() {
           </div>
         ))}
       </div>
-      <p className="mt-2 text-[11px] leading-snug text-ink-mute/80">
+      <p className="px-4 pb-3 text-[11px] leading-snug text-ink-mute/80">
         If the F keys change volume or brightness on a laptop, use the <Kbd>Alt</Kbd> + number keys, or hold <Kbd>Fn</Kbd> with the F key.
       </p>
-    </div>
+    </details>
   );
 }

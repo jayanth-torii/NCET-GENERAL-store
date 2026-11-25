@@ -171,18 +171,18 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
       const cy = H * 0.5;
       const s0 = Math.max(0.42, Math.min(1, Math.min(W, H) / 900));
 
-      // --- backdrop: NGI navy studio with an orange key light
+      // --- backdrop: NCET blue studio with a soft blue key light
       const bg = ctx.createRadialGradient(cx, cy * 0.9, 0, cx, cy, Math.hypot(W, H) * 0.65);
-      bg.addColorStop(0, '#1A3A7A');
-      bg.addColorStop(0.55, '#0E2455');
-      bg.addColorStop(1, '#040E24');
+      bg.addColorStop(0, '#1663A2');
+      bg.addColorStop(0.55, '#0F4C81');
+      bg.addColorStop(1, '#0C2339');
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, W, H);
       const glowA = clamp01((t - 1.5) / 0.9) * 0.55;
       if (glowA > 0) {
         const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.55);
-        g.addColorStop(0, `rgba(246,135,42,${glowA})`);
-        g.addColorStop(1, 'rgba(246,135,42,0)');
+        g.addColorStop(0, `rgba(74,155,212,${glowA})`);
+        g.addColorStop(1, 'rgba(74,155,212,0)');
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, W, H);
       }
@@ -256,8 +256,8 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
             ctx.fillStyle = color;
             ctx.fill();
           };
-          band(1, '#E8741A');
-          band(0.45, '#FFB86B');
+          band(1, '#247FC0');
+          band(0.45, '#84BDE4');
         }
         ctx.globalAlpha = 1;
       }
@@ -332,7 +332,7 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
           const px = cx + Math.cos(ang) * d;
           const py = cy + Math.sin(ang) * d * 0.7;
           ctx.globalAlpha = 1 - sp / life;
-          ctx.strokeStyle = k % 3 ? '#FFC58A' : '#FFFFFF';
+          ctx.strokeStyle = k % 3 ? '#B6D8F0' : '#FFFFFF';
           ctx.lineWidth = 2 * s0;
           ctx.beginPath();
           ctx.moveTo(px, py);
@@ -348,7 +348,7 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
         ctx.save();
         ctx.globalAlpha = 1 - (t - 1.38) / 0.32;
         ctx.strokeStyle = '#FFFFFF';
-        ctx.shadowColor = '#F6872A';
+        ctx.shadowColor = '#4A9BD4';
         ctx.shadowBlur = 10;
         ctx.lineWidth = 3 * s0;
         ctx.beginPath();
@@ -367,8 +367,8 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
       if (fl > 0) {
         const fg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.hypot(W, H) * 0.6);
         fg.addColorStop(0, `rgba(255,255,255,${0.55 * fl})`);
-        fg.addColorStop(0.35, `rgba(255,190,120,${0.3 * fl})`);
-        fg.addColorStop(1, 'rgba(255,190,120,0)');
+        fg.addColorStop(0.35, `rgba(132,189,228,${0.3 * fl})`);
+        fg.addColorStop(1, 'rgba(132,189,228,0)');
         ctx.fillStyle = fg;
         ctx.fillRect(0, 0, W, H);
       }
@@ -493,7 +493,7 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
   };
 
   return (
-    <div className="relative h-screen w-full overflow-hidden bg-navy-900 text-white" onMouseMove={onMove} data-intro-ready={actors ? '1' : undefined}>
+    <div className="relative h-screen w-full overflow-hidden bg-brand-950 text-white" onMouseMove={onMove} data-intro-ready={actors ? '1' : undefined}>
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-hidden="true" />
       <canvas ref={frontRef} className="pointer-events-none absolute inset-0 z-[5] h-full w-full" aria-hidden="true" />
 
@@ -501,27 +501,27 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
 
       {actors && (
         <div key={run} className="pointer-events-none absolute inset-0 flex items-center justify-center p-4">
-          <div className="pointer-events-auto w-[min(92vw,400px)] rounded-2xl border-t-4 border-brand-500 bg-gradient-to-b from-[#12224A]/95 to-[#0C1838]/95 px-6 py-5 text-center text-white shadow-2xl" style={anim('heroIn', 1.9, 0.75)}>
+          <div className="pointer-events-auto w-[min(92vw,400px)] rounded-xl border border-white/10 bg-brand-950/80 px-6 py-5 text-center text-white shadow-2xl backdrop-blur-md" style={anim('heroIn', 1.9, 0.75)}>
             <span className="mx-auto block w-fit rounded-xl bg-[#fff] px-3 py-1.5">
               <img src="/ncet-logo.png" alt="Nagarjuna College of Engineering & Technology" className="h-14 w-auto sm:h-16" />
             </span>
             <h1 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">{data?.storeName ? titleCase(data.storeName) : 'General Store'}</h1>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand-600">NCET campus store</p>
-            <p className="mt-3 text-sm text-ink-mute" style={anim('fadeUp', 2.4)}>
-              <span ref={counterRef} data-testid="item-count" className="font-mono text-lg font-semibold text-navy-700">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand-300">NCET campus store</p>
+            <p className="mt-3 text-sm text-white/70" style={anim('fadeUp', 2.4)}>
+              <span ref={counterRef} data-testid="item-count" className="font-mono text-lg font-semibold text-brand-300">
                 {instant ? (data?.total ?? 0).toLocaleString('en-IN') : '0'}
               </span>{' '}
               items on our shelves · {categories.length} categories
             </p>
             <div className="mt-3 flex flex-wrap justify-center gap-1.5">
               {categories.slice(0, 8).map(([c, n], i) => (
-                <span key={c} className="rounded-full bg-white/[0.08] px-2.5 py-0.5 text-[11px] font-medium text-ink-soft" style={anim('fadeUp', 4.3 + i * 0.07, 0.5)}>
-                  {c} <span className="text-ink-mute">{n}</span>
+                <span key={c} className="rounded-full bg-white/[0.08] px-2.5 py-0.5 text-[11px] font-medium text-white/80" style={anim('fadeUp', 4.3 + i * 0.07, 0.5)}>
+                  {c} <span className="text-white/60">{n}</span>
                 </span>
               ))}
             </div>
             <div className="mt-4 flex justify-center gap-2" style={anim('fadeUp', 5.1, 0.6)}>
-              <button onClick={onLogin} className="h-11 rounded-md bg-brand-600 px-6 text-sm font-semibold text-white shadow hover:bg-brand-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500">
+              <button onClick={onLogin} className="h-10 rounded-lg bg-[#fff] px-6 text-sm font-semibold text-[#0F4C81] shadow hover:bg-[#fff]/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">
                 Log in
               </button>
               <button
@@ -529,7 +529,7 @@ export function Landing({ onLogin }: { onLogin: () => void }) {
                   setSkipped(false);
                   setRun((r) => r + 1);
                 }}
-                className="h-11 rounded-md bg-white/[0.08] px-4 text-sm font-medium text-white hover:bg-white/15"
+                className="h-10 rounded-lg border border-white/20 bg-white/[0.06] px-4 text-sm font-medium text-white hover:bg-white/15"
               >
                 Replay
               </button>

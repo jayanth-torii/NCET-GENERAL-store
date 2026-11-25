@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
+import { r3n } from '../common/money';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
@@ -23,15 +24,20 @@ export class StockCheckService implements OnApplicationBootstrap {
   }
 
   async run() {
-    const drift = await this.prisma.$queryRaw<{ product_id: number; code: string; name: string; cached: Prisma.Decimal; ledger: Prisma.Decimal }[]>`
-      SELECT p.id AS product_id, p.code, p.name, coalesce(ps.on_hand, 0) AS cached, coalesce(l.total, 0) AS ledger
-      FROM product p
-      LEFT JOIN product_stock ps ON ps.product_id = p.id
-      LEFT JOIN (SELECT product_id, sum(qty) AS total FROM stock_movement GROUP BY product_id) l ON l.product_id = p.id
-      WHERE coalesce(ps.on_hand, 0) <> coalesce(l.total, 0)`;
-    const missing = await this.prisma.$queryRaw<{ id: number }[]>`SELECT p.id FROM product p LEFT JOIN product_stock ps ON ps.product_id = p.id WHERE ps.product_id IS NULL`;
-    if (missing.length) {
-      await this.prisma.productStock.createMany({ data: missing.map((m) => ({ productId: m.id, onHand: 0 })), skipDuplicates: true });
+    // Ledger total per product (MongoDB $group via Prisma groupBy) against the cached balance, at 3 dp.
+    const [products, balances, ledger] = await Promise.all([
+      this.prisma.product.findMany({ select: { id: true, code: true, name: true } }),
+      this.prisma.productStock.findMany({ select: { productId: true, onHand: true } }),
+      this.prisma.stockMovement.groupBy({ by: ['productId'], _sum: { qty: true } }),
+    ]);
+    const cachedOf = new Map(balances.map((b) => [b.productId, r3n(b.onHand)]));
+    const ledgerOf = new Map(ledger.map((l) => [l.productId, r3n(l._sum.qty ?? 0)]));
+    const drift = products
+      .map((p) => ({ product_id: p.id, code: p.code, name: p.name, cached: cachedOf.get(p.id) ?? 0, ledger: ledgerOf.get(p.id) ?? 0 }))
+      .filter((d) => d.cached !== d.ledger);
+    const missing = products.filter((p) => !cachedOf.has(p.id));
+    for (const m of missing) {
+      await this.prisma.productStock.upsert({ where: { productId: m.id }, create: { productId: m.id, onHand: 0 }, update: {} });
     }
     if (drift.length === 0) {
       this.logger.log('Stock ledger check passed');

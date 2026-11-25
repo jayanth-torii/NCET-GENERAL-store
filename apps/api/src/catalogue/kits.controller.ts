@@ -1,8 +1,9 @@
+import { withTx } from '../prisma/prisma.service';
 import { BadRequestException, Body, Controller, Get, NotFoundException, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { z } from 'zod';
 import { CurrentUser, R, Roles, SessionUser } from '../auth/auth.decorators';
 import { AuditService } from '../common/audit.service';
-import { D } from '../common/money';
+import { D, num } from '../common/money';
 import { parse, zMoney, zQty } from '../common/validate';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -52,7 +53,7 @@ export class KitsController {
     const data = parse(KitBody, body);
     await this.validate(data);
     const kit = await this.prisma.kit.create({
-      data: { code: data.code, name: data.name, price: D(data.price), isActive: data.isActive, items: { create: data.items.map((i) => ({ productId: i.productId, qty: D(i.qty) })) } },
+      data: { code: data.code, name: data.name, price: num(data.price), isActive: data.isActive, items: { create: data.items.map((i) => ({ productId: i.productId, qty: num(i.qty) })) } },
       include: { items: true },
     });
     await this.audit.log({ userId: u.id, action: 'KIT_CREATE', entity: 'kit', entityId: kit.id, after: kit });
@@ -67,11 +68,11 @@ export class KitsController {
     const data = parse(KitBody, body);
     await this.validate(data);
     // Past bills keep their own snapshot of kit contents (sale_kit_component), so editing is safe.
-    const kit = await this.prisma.$transaction(async (tx) => {
+    const kit = await withTx(this.prisma, async (tx) => {
       await tx.kitItem.deleteMany({ where: { kitId: id } });
       return tx.kit.update({
         where: { id },
-        data: { code: data.code, name: data.name, price: D(data.price), isActive: data.isActive, items: { create: data.items.map((i) => ({ productId: i.productId, qty: D(i.qty) })) } },
+        data: { code: data.code, name: data.name, price: num(data.price), isActive: data.isActive, items: { create: data.items.map((i) => ({ productId: i.productId, qty: num(i.qty) })) } },
         include: { items: true },
       });
     });

@@ -19,3 +19,12 @@ e2e-screens/
 # reference material kept outside the repository
 *.mp4
 NCET_Store_POS_Blueprint.pdf
+
+# AGY AI INTERNAL MEMORY
+agy-memory/
+AGY-MEMORY/
+.agy/
+.agy-memory/
+AGY_CONTEXT.md
+AGY_CAPSULES.md
+AGY_PROJECT_MEMORY.md

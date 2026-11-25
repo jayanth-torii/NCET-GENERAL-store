@@ -1,37 +1,88 @@
 /**
- * NGI / NCET theme, dark edition (matches the dashboard):
- *   page #06102A, cards #0F1E44, insets #0A1530, NGI orange #F6872A as the accent, font Poppins.
- * The token names (ink, line, paper, navy-50 …) stay the same as the light theme, so every page
- * switches to the dark look from here. Pale "50/100" tints become dark tints, and the 600/700
- * shades are lightened for text only (textColor) so buttons that fill with them keep their colour.
+ * NCET ERP theme (same look as the NCET ERP portal): white pages, soft grey cards, NCET brand blue
+ * #0F4C81 as the main colour, DMSans, light by default with a dark mode (class "dark" on <html>).
+ *
+ * COLOUR RULE: no colour values live here. Every token reads a CSS variable defined once in
+ * src/index.css (:root for light, .dark for dark), so the whole app re-colours from that one place.
+ * The token names (ink, line, paper, page, surface, brand, navy, leaf, amber, rose) are the ones the
+ * pages already use, so every screen follows the theme without per-page colour code.
+ *
+ * Status families have separate text shades (textColor) so a dark-mode label stays readable while a
+ * button filled with the same shade keeps its strong colour.
  * @type {import('tailwindcss').Config}
  */
+const v = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+const scale = (family, shades) => Object.fromEntries(shades.map((s) => [s, v(`${family}-${s}`)]));
+const BRAND = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+const STATUS = [50, 100, 500, 600, 700];
+const TEXT = [500, 600, 700, 800];
+
 export default {
+  darkMode: 'class',
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        ink: { DEFAULT: '#E8EDF8', soft: '#C5CEE6', mute: '#8E9CC2' },
-        line: '#1F3060',
-        paper: '#0A1530',
-        page: '#06102A',
-        surface: '#0F1E44',
-        navy: { 50: '#16295A', 100: '#22386E', 500: '#5B7BD0', 600: '#14306A', 700: '#0E2455', 800: '#0A1A40', 900: '#061633' },
-        brand: { 50: '#33293A', 100: '#4A3534', 500: '#F6872A', 600: '#E8741A', 700: '#C75D0C' },
-        leaf: { 50: '#123227', 100: '#1B4535', 600: '#2E8B57', 700: '#24714A' },
-        amber: { 50: '#3A2A12', 100: '#4D3816', 600: '#B86E0A', 700: '#965806' },
-        rose: { 50: '#3A1620', 100: '#55202C', 600: '#C8312A', 700: '#A3241E' },
+        ink: { DEFAULT: v('ink'), soft: v('ink-soft'), mute: v('ink-mute') },
+        line: v('line'),
+        paper: v('paper'),
+        page: v('page'),
+        surface: v('surface'),
+        sidebar: { DEFAULT: v('sidebar'), line: v('sidebar-line') },
+        main: { DEFAULT: v('main'), fg: v('main-fg') },
+        ring: v('ring'),
+        brand: scale('brand', BRAND),
+        navy: scale('brand', BRAND),
+        leaf: scale('leaf', STATUS),
+        amber: scale('amber', STATUS),
+        rose: scale('rose', STATUS),
+        chart: { 1: v('chart-1'), 2: v('chart-2'), 3: v('chart-3'), 4: v('chart-4'), 5: v('chart-5') },
+        nav: {
+          home: v('nav-home'),
+          sales: v('nav-sales'),
+          purchase: v('nav-purchase'),
+          stock: v('nav-stock'),
+          expiry: v('nav-expiry'),
+          reports: v('nav-reports'),
+          gst: v('nav-gst'),
+          masters: v('nav-masters'),
+          admin: v('nav-admin'),
+        },
       },
       textColor: {
-        navy: { 500: '#9DB4EE', 600: '#FFB27A', 700: '#FFB27A' },
-        brand: { 600: '#F6872A', 700: '#FFB27A' },
-        leaf: { 600: '#8FE3B0', 700: '#8FE3B0' },
-        amber: { 600: '#FFC27A', 700: '#FFC27A' },
-        rose: { 600: '#FF9AA5', 700: '#FF9AA5' },
+        brand: scale('brand-t', TEXT),
+        navy: scale('brand-t', TEXT),
+        leaf: scale('leaf-t', TEXT),
+        amber: scale('amber-t', TEXT),
+        rose: scale('rose-t', TEXT),
       },
       fontFamily: {
-        sans: ['Poppins', '"Segoe UI"', 'system-ui', 'sans-serif'],
+        sans: ['DMSans', 'Arial', 'Helvetica', 'sans-serif'],
         mono: ['"IBM Plex Mono"', 'Consolas', 'ui-monospace', 'monospace'],
+      },
+      borderRadius: {
+        lg: '0.5rem',
+        md: 'calc(0.5rem - 2px)',
+        sm: 'calc(0.5rem - 4px)',
+      },
+      boxShadow: {
+        card: '0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06)',
+        lift: '0 10px 30px -12px rgb(0 0 0 / 0.18)',
+        pop: '0 20px 50px -20px rgb(0 0 0 / 0.35)',
+      },
+      keyframes: {
+        'pop-in': { from: { opacity: '0', transform: 'translateY(6px) scale(0.98)' }, to: { opacity: '1', transform: 'none' } },
+        'fade-in': { from: { opacity: '0' }, to: { opacity: '1' } },
+        'slide-in': { from: { transform: 'translateX(-100%)' }, to: { transform: 'none' } },
+        'row-in': { from: { opacity: '0', transform: 'translateY(-6px)', backgroundColor: 'rgb(var(--brand-500) / 0.18)' }, to: { opacity: '1', transform: 'none' } },
+        bump: { '0%': { transform: 'scale(1)' }, '40%': { transform: 'scale(1.06)' }, '100%': { transform: 'scale(1)' } },
+      },
+      animation: {
+        'row-in': 'row-in 0.35s ease-out',
+        bump: 'bump 0.25s ease-out',
+        'pop-in': 'pop-in 0.16s ease-out',
+        'fade-in': 'fade-in 0.15s ease-out',
+        'slide-in': 'slide-in 0.2s ease-out',
       },
     },
   },

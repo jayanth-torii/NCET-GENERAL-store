@@ -1,13 +1,25 @@
-// NCET Store POS v2 data model.
-// Money: Decimal(12,2). Quantities: Decimal(12,3). Unit costs and rates: Decimal(12,4).
-// All timestamps are timestamptz set by the server.
+// NCET Store POS v2 data model — MongoDB (Atlas) edition.
+//
+// Collections and field names are the same as the PostgreSQL edition (prisma/postgres-legacy), so data
+// copies across 1:1 (scripts/migrate-from-postgres.ts).
+//
+// What changed for MongoDB, and where the old database guarantee now lives:
+//   • Ids stay numeric (URLs such as /purchases/22 keep working). MongoDB has no auto-increment, so new
+//     ids come from an atomic sequence collection (`_seq`) — see src/prisma/prisma.service.ts.
+//   • Money and quantities are stored as numbers (Float). Every calculation still runs in Decimal
+//     (src/common/money.ts) and is rounded to 2 dp (money) / 3 dp (qty) / 4 dp (unit cost) before saving.
+//   • Partial unique indexes (one active product per name, one live GRN per supplier invoice) are
+//     created by src/prisma/mongo-indexes.ts on `npm run migrate` and on every API start.
+//   • The stock ledger and audit log are append-only: the Prisma client refuses update/delete on them
+//     (the PostgreSQL edition used database triggers).
+//   • Row locks are replaced by MongoDB transactions with automatic retry on write conflicts.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mongodb"
   url      = env("DATABASE_URL")
 }
 
@@ -68,17 +80,17 @@ enum GstMode {
 }
 
 model AppUser {
-  id                 Int      @id @default(autoincrement())
-  username           String   @unique
-  fullName           String   @map("full_name")
+  id                 Int       @id @default(0) @map("_id")
+  username           String    @unique
+  fullName           String    @map("full_name")
   role               Role
-  passwordHash       String   @map("password_hash")
-  mustChangePassword Boolean  @default(true) @map("must_change_password")
-  tokenVersion       Int      @default(0) @map("token_version")
-  lockedAt           DateTime? @map("locked_at") @db.Timestamptz(6) // counter locked with Ctrl+L; every request refused until unlocked
-  isActive           Boolean  @default(true) @map("is_active")
-  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  passwordHash       String    @map("password_hash")
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
+  tokenVersion       Int       @default(0) @map("token_version")
+  lockedAt           DateTime? @map("locked_at") // counter locked with Ctrl+L; every request refused until unlocked
+  isActive           Boolean   @default(true) @map("is_active")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   sales             Sale[]
   cancelledSales    Sale[]            @relation("SaleCancelledBy")
@@ -100,15 +112,15 @@ model AppUser {
 // One row per login. The cookie carries the session id; logging out, a password change, or an admin
 // revoke marks it revoked and every later request with that cookie is refused.
 model Session {
-  id         String    @id @default(uuid()) @db.Uuid
+  id         String    @id @default(uuid()) @map("_id")
   userId     Int       @map("user_id")
   counterId  Int?      @map("counter_id")
   ip         String?
   userAgent  String?   @map("user_agent")
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
-  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
-  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at")
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
   revokedBy  String?   @map("revoked_by") // LOGOUT, PASSWORD_CHANGE, ADMIN, USER_DISABLED, EXPIRED
 
   user AppUser @relation(fields: [userId], references: [id])
@@ -118,12 +130,12 @@ model Session {
 }
 
 model Counter {
-  id          Int      @id @default(autoincrement())
+  id          Int      @id @default(0) @map("_id")
   code        String   @unique // C1, C2 ... used as bill prefix
   name        String
   printerName String?  @map("printer_name")
   isActive    Boolean  @default(true) @map("is_active")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at")
 
   sales     Sale[]
   heldBills HeldBill[]
@@ -132,7 +144,7 @@ model Counter {
 }
 
 model Category {
-  id       Int       @id @default(autoincrement())
+  id       Int       @id @default(0) @map("_id")
   name     String    @unique
   products Product[]
 
@@ -140,7 +152,7 @@ model Category {
 }
 
 model Unit {
-  id           Int       @id @default(autoincrement())
+  id           Int       @id @default(0) @map("_id")
   code         String    @unique // PCS, BOX, PKT, REAM, DOZ
   name         String
   allowDecimal Boolean   @default(false) @map("allow_decimal")
@@ -151,28 +163,29 @@ model Unit {
 }
 
 model Product {
-  id           Int      @id @default(autoincrement())
+  id           Int      @id @default(0) @map("_id")
   code         String   @unique // legacy Item Code kept
-  barcode      String?  @unique
+  barcode      String?          // unique when set: partial index product_barcode_key (src/prisma/mongo-indexes.ts)
   name         String
+  nameKey      String?  @map("name_key") // lower-case, single-spaced name; unique among active products (product_name_uq)
   categoryId   Int      @map("category_id")
   unitId       Int      @map("unit_id")
   packUnitId   Int?     @map("pack_unit_id")
-  packSize     Decimal  @default(1) @map("pack_size") @db.Decimal(12, 3)
+  packSize     Float    @default(1) @map("pack_size")
   hsnCode      String?  @map("hsn_code")
-  gstRate      Decimal  @default(0) @map("gst_rate") @db.Decimal(5, 2)
-  mrp          Decimal? @db.Decimal(12, 2)
-  salePrice    Decimal  @map("sale_price") @db.Decimal(12, 2)
-  lastCost     Decimal? @map("last_cost") @db.Decimal(12, 4)
-  reorderLevel Decimal  @default(0) @map("reorder_level") @db.Decimal(12, 3)
+  gstRate      Float    @default(0) @map("gst_rate")
+  mrp          Float?
+  salePrice    Float    @map("sale_price")
+  lastCost     Float?   @map("last_cost")
+  reorderLevel Float    @default(0) @map("reorder_level")
   rackNo       String?  @map("rack_no")
   isActive     Boolean  @default(true) @map("is_active")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
-  category      Category              @relation(fields: [categoryId], references: [id])
-  unit          Unit                  @relation("ProductUnit", fields: [unitId], references: [id])
-  packUnit      Unit?                 @relation("ProductPackUnit", fields: [packUnitId], references: [id])
+  category      Category           @relation(fields: [categoryId], references: [id])
+  unit          Unit               @relation("ProductUnit", fields: [unitId], references: [id])
+  packUnit      Unit?              @relation("ProductPackUnit", fields: [packUnitId], references: [id])
   stock         ProductStock?
   movements     StockMovement[]
   purchaseItems PurchaseItem[]
@@ -186,24 +199,24 @@ model Product {
 }
 
 model ProductStock {
-  productId Int     @id @map("product_id")
-  onHand    Decimal @default(0) @map("on_hand") @db.Decimal(12, 3)
+  productId Int     @id @map("_id")
+  onHand    Float   @default(0) @map("on_hand")
   product   Product @relation(fields: [productId], references: [id])
 
   @@map("product_stock")
 }
 
 model StockMovement {
-  id          BigInt       @id @default(autoincrement())
+  id          BigInt       @id @default(0) @map("_id")
   productId   Int          @map("product_id")
   kind        MovementKind
-  qty         Decimal      @db.Decimal(12, 3) // signed: + in, - out
-  unitCost    Decimal?     @map("unit_cost") @db.Decimal(12, 4)
+  qty         Float // signed: + in, - out
+  unitCost    Float?       @map("unit_cost")
   refType     String       @map("ref_type") // SALE, PURCHASE, SALES_RETURN, PURCHASE_RETURN, ADJUSTMENT, OPENING
   refId       BigInt       @map("ref_id")
   note        String?
   createdById Int?         @map("created_by")
-  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt   DateTime     @default(now()) @map("created_at")
 
   product   Product  @relation(fields: [productId], references: [id])
   createdBy AppUser? @relation(fields: [createdById], references: [id])
@@ -215,13 +228,13 @@ model StockMovement {
 }
 
 model Supplier {
-  id        Int        @id @default(autoincrement())
-  name      String     @unique
+  id        Int              @id @default(0) @map("_id")
+  name      String           @unique
   phone     String?
   gstin     String?
   address   String?
-  isActive  Boolean    @default(true) @map("is_active")
-  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  isActive  Boolean          @default(true) @map("is_active")
+  createdAt DateTime         @default(now()) @map("created_at")
   purchases Purchase[]
   returns   PurchaseReturn[]
 
@@ -229,7 +242,7 @@ model Supplier {
 }
 
 model ChargeType {
-  id         Int              @id @default(autoincrement())
+  id         Int              @id @default(0) @map("_id")
   name       String           @unique
   addsToCost Boolean          @default(true) @map("adds_to_cost")
   allocation ChargeAllocation @default(BY_VALUE)
@@ -240,31 +253,32 @@ model ChargeType {
 }
 
 model Purchase {
-  id                Int            @id @default(autoincrement())
-  purchaseNo        String?        @unique @map("purchase_no") // GRN number, GRN/26-27/0001, assigned when the bill is first saved
+  id                Int            @id @default(0) @map("_id")
+  purchaseNo        String?        @map("purchase_no") // unique when set: partial index purchase_purchase_no_key; // GRN number, GRN/26-27/0001, assigned when the bill is first saved
   supplierId        Int            @map("supplier_id")
   supplierInvoiceNo String         @map("supplier_invoice_no")
-  invoiceDate       DateTime       @map("invoice_date") @db.Date
+  invoiceKey        String?        @map("invoice_key") // lower(trim(invoice no)); unique per supplier while not cancelled (purchase_supplier_invoice_uq)
+  invoiceDate       DateTime       @map("invoice_date")
   taxInclusive      Boolean        @default(false) @map("tax_inclusive")
-  itemsTotal        Decimal        @default(0) @map("items_total") @db.Decimal(12, 2)
-  taxTotal          Decimal        @default(0) @map("tax_total") @db.Decimal(12, 2)
-  chargesTotal      Decimal        @default(0) @map("charges_total") @db.Decimal(12, 2)
-  discountTotal     Decimal        @default(0) @map("discount_total") @db.Decimal(12, 2)
-  roundOff          Decimal        @default(0) @map("round_off") @db.Decimal(6, 2)
-  grandTotal        Decimal        @default(0) @map("grand_total") @db.Decimal(12, 2)
-  invoiceTotal      Decimal?       @map("invoice_total") @db.Decimal(12, 2)
+  itemsTotal        Float          @default(0) @map("items_total")
+  taxTotal          Float          @default(0) @map("tax_total")
+  chargesTotal      Float          @default(0) @map("charges_total")
+  discountTotal     Float          @default(0) @map("discount_total")
+  roundOff          Float          @default(0) @map("round_off")
+  grandTotal        Float          @default(0) @map("grand_total")
+  invoiceTotal      Float?         @map("invoice_total")
   status            PurchaseStatus @default(DRAFT)
   notes             String?
-  readyAt           DateTime?      @map("ready_at") @db.Timestamptz(6) // store keeper marked it ready for a manager to post
+  readyAt           DateTime?      @map("ready_at") // store keeper marked it ready for a manager to post
   readyById         Int?           @map("ready_by")
   readyBy           AppUser?       @relation("PurchaseReadyBy", fields: [readyById], references: [id])
   createdById       Int            @map("created_by")
   postedById        Int?           @map("posted_by")
-  postedAt          DateTime?      @map("posted_at") @db.Timestamptz(6)
-  cancelledAt       DateTime?      @map("cancelled_at") @db.Timestamptz(6)
+  postedAt          DateTime?      @map("posted_at")
+  cancelledAt       DateTime?      @map("cancelled_at")
   cancelReason      String?        @map("cancel_reason")
-  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
 
   supplier  Supplier         @relation(fields: [supplierId], references: [id])
   createdBy AppUser          @relation("PurchaseCreatedBy", fields: [createdById], references: [id])
@@ -273,34 +287,32 @@ model Purchase {
   charges   PurchaseCharge[]
   returns   PurchaseReturn[]
 
-  // A partial unique index (supplier_id, lower(supplier_invoice_no)) WHERE status <> 'CANCELLED'
-  // is created in the migration SQL to block double entry of one supplier bill.
   @@index([supplierId])
   @@index([status, postedAt])
   @@map("purchase")
 }
 
 model PurchaseItem {
-  id             Int       @id @default(autoincrement())
+  id             Int       @id @default(0) @map("_id")
   purchaseId     Int       @map("purchase_id")
   productId      Int       @map("product_id")
   lineNo         Int       @map("line_no")
   entryUnit      EntryUnit @default(BASE) @map("entry_unit")
-  enteredQty     Decimal   @map("entered_qty") @db.Decimal(12, 3)
-  packSize       Decimal   @map("pack_size") @db.Decimal(12, 3)
-  baseQty        Decimal   @map("base_qty") @db.Decimal(12, 3)
-  rate           Decimal   @db.Decimal(12, 4) // per entered unit
-  grossAmount    Decimal   @map("gross_amount") @db.Decimal(12, 2) // qty x rate, or the typed line amount
-  discount       Decimal   @default(0) @db.Decimal(12, 2)
-  gstRate        Decimal   @default(0) @map("gst_rate") @db.Decimal(5, 2)
-  taxAmount      Decimal   @default(0) @map("tax_amount") @db.Decimal(12, 2)
-  lineTotal      Decimal   @map("line_total") @db.Decimal(12, 2)
-  landedUnitCost Decimal?  @map("landed_unit_cost") @db.Decimal(12, 4)
+  enteredQty     Float     @map("entered_qty")
+  packSize       Float     @map("pack_size")
+  baseQty        Float     @map("base_qty")
+  rate           Float // per entered unit
+  grossAmount    Float     @map("gross_amount") // qty x rate, or the typed line amount
+  discount       Float     @default(0)
+  gstRate        Float     @default(0) @map("gst_rate")
+  taxAmount      Float     @default(0) @map("tax_amount")
+  lineTotal      Float     @map("line_total")
+  landedUnitCost Float?    @map("landed_unit_cost")
   batch          String?
-  expiry         DateTime? @db.Date
+  expiry         DateTime?
   // New selling price (and MRP) typed on the GRN. Applied to the product master when the GRN is posted.
-  salePrice      Decimal?  @map("sale_price") @db.Decimal(12, 2)
-  mrp            Decimal?  @db.Decimal(12, 2)
+  salePrice      Float?    @map("sale_price")
+  mrp            Float?
 
   purchase    Purchase             @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
   product     Product              @relation(fields: [productId], references: [id])
@@ -312,10 +324,10 @@ model PurchaseItem {
 }
 
 model PurchaseCharge {
-  id           Int     @id @default(autoincrement())
+  id           Int     @id @default(0) @map("_id")
   purchaseId   Int     @map("purchase_id")
   chargeTypeId Int     @map("charge_type_id")
-  amount       Decimal @db.Decimal(12, 2)
+  amount       Float
   paidTo       String? @map("paid_to") // transporter
   referenceNo  String? @map("reference_no") // LR number
 
@@ -327,13 +339,13 @@ model PurchaseCharge {
 }
 
 model Kit {
-  id        Int       @id @default(autoincrement())
-  code      String    @unique
+  id        Int        @id @default(0) @map("_id")
+  code      String     @unique
   name      String
-  price     Decimal   @db.Decimal(12, 2)
-  isActive  Boolean   @default(true) @map("is_active")
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  price     Float
+  isActive  Boolean    @default(true) @map("is_active")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
   items     KitItem[]
   saleItems SaleItem[]
 
@@ -341,10 +353,10 @@ model Kit {
 }
 
 model KitItem {
-  id        Int     @id @default(autoincrement())
+  id        Int     @id @default(0) @map("_id")
   kitId     Int     @map("kit_id")
   productId Int     @map("product_id")
-  qty       Decimal @db.Decimal(12, 3)
+  qty       Float
   kit       Kit     @relation(fields: [kitId], references: [id], onDelete: Cascade)
   product   Product @relation(fields: [productId], references: [id])
 
@@ -353,29 +365,30 @@ model KitItem {
 }
 
 model Sale {
-  id             BigInt     @id @default(autoincrement())
+  id             BigInt     @id @default(0) @map("_id")
   billNo         String     @unique @map("bill_no") // C2/26-27/000481
   counterId      Int        @map("counter_id")
   userId         Int        @map("user_id")
-  billedAt       DateTime   @default(now()) @map("billed_at") @db.Timestamptz(6)
-  itemsTotal     Decimal    @map("items_total") @db.Decimal(12, 2)
-  discountTotal  Decimal    @default(0) @map("discount_total") @db.Decimal(12, 2)
-  taxTotal       Decimal    @default(0) @map("tax_total") @db.Decimal(12, 2)
-  roundOff       Decimal    @default(0) @map("round_off") @db.Decimal(6, 2)
-  grandTotal     Decimal    @map("grand_total") @db.Decimal(12, 2)
-  tendered       Decimal    @default(0) @db.Decimal(12, 2)
-  changeDue      Decimal    @default(0) @map("change_due") @db.Decimal(12, 2)
+  billedAt       DateTime   @default(now()) @map("billed_at")
+  itemsTotal     Float      @map("items_total")
+  discountTotal  Float      @default(0) @map("discount_total")
+  taxTotal       Float      @default(0) @map("tax_total")
+  roundOff       Float      @default(0) @map("round_off")
+  grandTotal     Float      @map("grand_total")
+  tendered       Float      @default(0)
+  changeDue      Float      @default(0) @map("change_due")
   status         SaleStatus @default(COMPLETED)
-  idempotencyKey String     @unique @map("idempotency_key") @db.Uuid
+  idempotencyKey String     @unique @map("idempotency_key")
   customerName   String?    @map("customer_name")
   remarks        String?
   printCount     Int        @default(0) @map("print_count") // receipts issued; the 2nd onwards are stamped DUPLICATE
   priceOverride  Boolean    @default(false) @map("price_override") // a manager billed a line below the master price
-  editedAt       DateTime?  @map("edited_at") @db.Timestamptz(6)
+  editedAt       DateTime?  @map("edited_at")
   editCount      Int        @default(0) @map("edit_count")
   cancelReason   String?    @map("cancel_reason")
   cancelledById  Int?       @map("cancelled_by")
-  cancelledAt    DateTime?  @map("cancelled_at") @db.Timestamptz(6)
+  cancelledAt    DateTime?  @map("cancelled_at")
+  rowVersion     Int        @default(0) @map("row_version") // bumped to claim the bill inside a transaction (edit / cancel / return)
 
   counter     Counter       @relation(fields: [counterId], references: [id])
   user        AppUser       @relation(fields: [userId], references: [id])
@@ -391,21 +404,21 @@ model Sale {
 }
 
 model SaleItem {
-  id           Int     @id @default(autoincrement())
+  id           Int     @id @default(0) @map("_id")
   saleId       BigInt  @map("sale_id")
   lineNo       Int     @map("line_no")
   productId    Int?    @map("product_id")
   kitId        Int?    @map("kit_id")
   codeSnapshot String  @map("code_snapshot")
   nameSnapshot String  @map("name_snapshot")
-  qty          Decimal @db.Decimal(12, 3)
-  rate         Decimal @db.Decimal(12, 2)
-  masterRate   Decimal @default(0) @map("master_rate") @db.Decimal(12, 2) // price on the master at the time of sale
-  discount     Decimal @default(0) @db.Decimal(12, 2)
-  gstRate      Decimal @default(0) @map("gst_rate") @db.Decimal(5, 2)
-  taxAmount    Decimal @default(0) @map("tax_amount") @db.Decimal(12, 2)
-  lineTotal    Decimal @map("line_total") @db.Decimal(12, 2)
-  costAtSale   Decimal @default(0) @map("cost_at_sale") @db.Decimal(12, 4) // per unit
+  qty          Float
+  rate         Float
+  masterRate   Float   @default(0) @map("master_rate") // price on the master at the time of sale
+  discount     Float   @default(0)
+  gstRate      Float   @default(0) @map("gst_rate")
+  taxAmount    Float   @default(0) @map("tax_amount")
+  lineTotal    Float   @map("line_total")
+  costAtSale   Float   @default(0) @map("cost_at_sale") // per unit
 
   sale        Sale               @relation(fields: [saleId], references: [id], onDelete: Cascade)
   product     Product?           @relation(fields: [productId], references: [id])
@@ -421,12 +434,12 @@ model SaleItem {
 // Snapshot of what one unit of a kit line contained when it was sold, so returns and reports stay correct
 // even if the kit definition changes later.
 model SaleKitComponent {
-  id         Int     @id @default(autoincrement())
+  id         Int     @id @default(0) @map("_id")
   saleItemId Int     @map("sale_item_id")
   productId  Int     @map("product_id")
-  qtyPerKit  Decimal @map("qty_per_kit") @db.Decimal(12, 3)
-  gstRate    Decimal @default(0) @map("gst_rate") @db.Decimal(5, 2)
-  unitCost   Decimal @default(0) @map("unit_cost") @db.Decimal(12, 4)
+  qtyPerKit  Float   @map("qty_per_kit")
+  gstRate    Float   @default(0) @map("gst_rate")
+  unitCost   Float   @default(0) @map("unit_cost")
 
   saleItem SaleItem @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
   product  Product  @relation(fields: [productId], references: [id])
@@ -436,25 +449,26 @@ model SaleKitComponent {
 }
 
 model SalePayment {
-  id        Int         @id @default(autoincrement())
+  id        Int         @id @default(0) @map("_id")
   saleId    BigInt      @map("sale_id")
   mode      PaymentMode
-  amount    Decimal     @db.Decimal(12, 2) // amount applied to the bill (cash net of change)
+  amount    Float // amount applied to the bill (cash net of change)
   reference String?
 
   sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
 
   @@index([saleId])
+  @@index([mode, reference])
   @@map("sale_payment")
 }
 
 model HeldBill {
-  id        Int      @id @default(autoincrement())
+  id        Int      @id @default(0) @map("_id")
   counterId Int      @map("counter_id")
   userId    Int      @map("user_id")
   label     String
   payload   Json
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at")
 
   counter Counter @relation(fields: [counterId], references: [id])
   user    AppUser @relation(fields: [userId], references: [id])
@@ -464,14 +478,14 @@ model HeldBill {
 }
 
 model SalesReturn {
-  id         Int         @id @default(autoincrement())
+  id         Int         @id @default(0) @map("_id")
   returnNo   String      @unique @map("return_no")
   saleId     BigInt      @map("sale_id")
   userId     Int         @map("user_id")
   reason     String
   refundMode PaymentMode @default(CASH) @map("refund_mode")
-  total      Decimal     @db.Decimal(12, 2)
-  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  total      Float
+  createdAt  DateTime    @default(now()) @map("created_at")
 
   sale  Sale              @relation(fields: [saleId], references: [id])
   user  AppUser           @relation(fields: [userId], references: [id])
@@ -482,11 +496,11 @@ model SalesReturn {
 }
 
 model SalesReturnItem {
-  id         Int     @id @default(autoincrement())
-  returnId   Int     @map("return_id")
-  saleItemId Int     @map("sale_item_id")
-  qty        Decimal @db.Decimal(12, 3)
-  amount     Decimal @db.Decimal(12, 2)
+  id         Int   @id @default(0) @map("_id")
+  returnId   Int   @map("return_id")
+  saleItemId Int   @map("sale_item_id")
+  qty        Float
+  amount     Float
 
   salesReturn SalesReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
   saleItem    SaleItem    @relation(fields: [saleItemId], references: [id])
@@ -496,14 +510,14 @@ model SalesReturnItem {
 }
 
 model PurchaseReturn {
-  id         Int      @id @default(autoincrement())
+  id         Int      @id @default(0) @map("_id")
   returnNo   String   @unique @map("return_no")
   purchaseId Int      @map("purchase_id")
   supplierId Int      @map("supplier_id")
   userId     Int      @map("user_id")
   reason     String
-  total      Decimal  @db.Decimal(12, 2)
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  total      Float
+  createdAt  DateTime @default(now()) @map("created_at")
 
   purchase Purchase             @relation(fields: [purchaseId], references: [id])
   supplier Supplier             @relation(fields: [supplierId], references: [id])
@@ -515,11 +529,11 @@ model PurchaseReturn {
 }
 
 model PurchaseReturnItem {
-  id             Int     @id @default(autoincrement())
-  returnId       Int     @map("return_id")
-  purchaseItemId Int     @map("purchase_item_id")
-  baseQty        Decimal @map("base_qty") @db.Decimal(12, 3)
-  amount         Decimal @db.Decimal(12, 2)
+  id             Int   @id @default(0) @map("_id")
+  returnId       Int   @map("return_id")
+  purchaseItemId Int   @map("purchase_item_id")
+  baseQty        Float @map("base_qty")
+  amount         Float
 
   purchaseReturn PurchaseReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
   purchaseItem   PurchaseItem   @relation(fields: [purchaseItemId], references: [id])
@@ -529,16 +543,16 @@ model PurchaseReturnItem {
 }
 
 model StockAdjustment {
-  id            Int              @id @default(autoincrement())
+  id            Int              @id @default(0) @map("_id")
   productId     Int              @map("product_id")
-  qtyChange     Decimal          @map("qty_change") @db.Decimal(12, 3)
+  qtyChange     Float            @map("qty_change")
   reason        String
   status        AdjustmentStatus @default(PENDING)
   requestedById Int              @map("requested_by")
   decidedById   Int?             @map("decided_by")
   decisionNote  String?          @map("decision_note")
-  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
-  decidedAt     DateTime?        @map("decided_at") @db.Timestamptz(6)
+  createdAt     DateTime         @default(now()) @map("created_at")
+  decidedAt     DateTime?        @map("decided_at")
 
   product     Product  @relation(fields: [productId], references: [id])
   requestedBy AppUser  @relation("AdjRequestedBy", fields: [requestedById], references: [id])
@@ -549,7 +563,7 @@ model StockAdjustment {
 }
 
 model AuditLog {
-  id        BigInt   @id @default(autoincrement())
+  id        BigInt   @id @default(0) @map("_id")
   userId    Int?     @map("user_id")
   action    String
   entity    String
@@ -557,7 +571,7 @@ model AuditLog {
   before    Json?
   after     Json?
   ip        String?
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at")
 
   user AppUser? @relation(fields: [userId], references: [id])
 
@@ -566,18 +580,17 @@ model AuditLog {
   @@map("audit_log")
 }
 
-// Gapless document numbers. One row per series, e.g. "SALE:C2:26-27".
-// Incremented with INSERT .. ON CONFLICT DO UPDATE .. RETURNING inside the document's transaction,
-// so each counter only ever waits on its own row.
+// Gapless document numbers. One document per series, e.g. "SALE:C2:26-27".
+// Incremented inside the document's transaction, so a failed save rolls the number back too.
 model DocCounter {
-  key   String @id
+  key   String @id @map("_id")
   value Int
 
   @@map("doc_counter")
 }
 
 model StoreSetting {
-  id                 Int      @id @default(1)
+  id                 Int      @id @default(1) @map("_id")
   storeName          String   @default("GENERAL STORE") @map("store_name")
   addressLine        String   @default("Nagarjuna College of Engineering & Technology") @map("address_line")
   phone              String?
@@ -586,7 +599,7 @@ model StoreSetting {
   receiptFooter      String   @default("Thank you! Goods once sold can be returned only with this bill.") @map("receipt_footer")
   blockNegativeStock Boolean  @default(false) @map("block_negative_stock")
   roundBillToRupee   Boolean  @default(true) @map("round_bill_to_rupee")
-  maxCashierDiscount Decimal  @default(0) @map("max_cashier_discount_pct") @db.Decimal(5, 2)
+  maxCashierDiscount Float    @default(0) @map("max_cashier_discount_pct")
   // UPI collection: the store's UPI ID and the name shown in the customer's app. A QR with the exact
   // bill amount is generated at the counter from these.
   upiId                String?  @map("upi_id")
@@ -595,19 +608,27 @@ model StoreSetting {
   requireCardReference Boolean  @default(false) @map("require_card_reference")
   autoLockMinutes      Int      @default(10) @map("auto_lock_minutes") // 0 = never lock automatically
   returnWindowDays     Int      @default(30) @map("return_window_days") // sales returns accepted up to this many days after the bill
-  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
   @@map("store_setting")
 }
 
 model SystemAlert {
-  id         Int       @id @default(autoincrement())
+  id         Int       @id @default(0) @map("_id")
   kind       String
   message    String
   details    Json?
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  resolvedAt DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  resolvedAt DateTime? @map("resolved_at")
 
   @@index([resolvedAt])
   @@map("system_alert")
+}
+
+// Next id per collection (MongoDB has no auto-increment). Managed by src/prisma/prisma.service.ts.
+model Sequence {
+  name  String @id @map("_id")
+  value Int
+
+  @@map("_seq")
 }

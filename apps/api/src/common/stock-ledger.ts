@@ -1,14 +1,15 @@
 import { ConflictException } from '@nestjs/common';
 import { MovementKind, Prisma } from '@prisma/client';
-import { D, Dec } from './money';
+import { holdKeys } from './keyed-lock';
+import { D, Dec, num } from './money';
 
 type Tx = Prisma.TransactionClient;
 
 export interface Movement {
   productId: number;
   kind: MovementKind;
-  qty: Dec; // signed: + in, - out
-  unitCost?: Dec | null;
+  qty: Dec | number; // signed: + in, - out
+  unitCost?: Dec | number | null;
   refType: string;
   refId: bigint | number;
   note?: string | null;
@@ -48,8 +49,8 @@ export async function applyMovements(
     data: nonZero.map((m) => ({
       productId: m.productId,
       kind: m.kind,
-      qty: D(m.qty),
-      unitCost: m.unitCost ?? null,
+      qty: num(m.qty),
+      unitCost: num(m.unitCost),
       refType: m.refType,
       refId: BigInt(m.refId),
       note: m.note ?? null,
@@ -57,26 +58,21 @@ export async function applyMovements(
     })),
   });
 
-  const negatives: number[] = [];
-  for (const [productId, delta] of ordered) {
-    if (delta.isZero()) continue;
-    const rows = await tx.$queryRaw<{ on_hand: Prisma.Decimal }[]>`
-      UPDATE product_stock SET on_hand = on_hand + ${delta.toString()}::numeric
-      WHERE product_id = ${productId}
-      RETURNING on_hand`;
-    let onHand: Dec;
-    if (rows.length === 0) {
-      // Defensive: every product gets a balance row at creation, but never lose a movement.
-      const ins = await tx.$queryRaw<{ on_hand: Prisma.Decimal }[]>`
-        INSERT INTO product_stock (product_id, on_hand) VALUES (${productId}, ${delta.toString()}::numeric)
-        ON CONFLICT (product_id) DO UPDATE SET on_hand = product_stock.on_hand + EXCLUDED.on_hand
-        RETURNING on_hand`;
-      onHand = D(ins[0].on_hand);
-    } else {
-      onHand = D(rows[0].on_hand);
-    }
-    if (delta.lt(0) && onHand.lt(0)) negatives.push(productId);
-  }
+  const changed = ordered.filter(([, d]) => !d.isZero());
+  if (changed.length === 0) return [];
+  // Wait for any other transaction changing these products to commit (the row-lock equivalent, see
+  // keyed-lock.ts); held until this transaction ends.
+  await holdKeys(changed.map(([productId]) => `stock:${productId}`));
+  // One round trip for every balance: atomic $inc inside the transaction (never read-modify-write);
+  // upsert creates a missing balance row. If another server instance wrote the same balance, MongoDB
+  // reports a write conflict and withTx re-runs the whole transaction.
+  await tx.$runCommandRaw({
+    update: 'product_stock',
+    updates: changed.map(([productId, delta]) => ({ q: { _id: productId }, u: { $inc: { on_hand: num(delta) } }, upsert: true })),
+  });
+  const balances = await tx.productStock.findMany({ where: { productId: { in: changed.map(([p]) => p) } }, select: { productId: true, onHand: true } });
+  // Balances are compared at 3 dp (repeated float increments can carry ~1e-12 noise).
+  const negatives = balances.filter((b) => deltas.get(b.productId)!.lt(0) && D(b.onHand).toDecimalPlaces(3).lt(0)).map((b) => b.productId);
 
   if (negatives.length === 0) return [];
   const products = await tx.product.findMany({

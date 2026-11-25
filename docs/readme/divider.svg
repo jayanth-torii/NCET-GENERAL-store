@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="24" viewBox="0 0 1200 24" role="presentation">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1">
+      <stop offset="0" stop-color="#0F4C81" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#4a9bd4"/>
+      <stop offset="1" stop-color="#0F4C81" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <style>
+    .w{fill:none;stroke:url(#g);stroke-width:2.5;animation:w 6s ease-in-out infinite alternate}
+    @keyframes w{to{d:path("M0 12 Q 150 22 300 12 T 600 12 T 900 12 T 1200 12")}}
+    @media (prefers-reduced-motion: reduce){.w{animation:none}}
+  </style>
+  <path class="w" d="M0 12 Q 150 2 300 12 T 600 12 T 900 12 T 1200 12"/>
+</svg>

@@ -7,11 +7,11 @@
     "build": "prisma generate && nest build",
     "start": "node dist/main.js",
     "test": "vitest run",
-    "migrate:dev": "prisma migrate dev",
-    "migrate:deploy": "prisma migrate deploy",
+    "migrate:deploy": "prisma db push --skip-generate && tsx prisma/migrate-mongo.ts",
     "seed": "tsx prisma/seed.ts",
     "seed:demo": "tsx prisma/seed-demo.ts",
-    "check:stock": "tsx src/scripts/check-stock.ts"
+    "check:stock": "tsx src/scripts/check-stock.ts",
+    "migrate:from-postgres": "tsx prisma/migrate-from-postgres.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.6",
@@ -27,6 +27,7 @@
     "exceljs": "^4.4.0",
     "multer": "^2.0.2",
     "pdfmake": "^0.2.20",
+    "pg": "^8.13.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "zod": "^3.25.76"
@@ -38,6 +39,7 @@
     "@types/multer": "^2.0.0",
     "@types/node": "^22.18.0",
     "@types/pdfmake": "^0.2.11",
+    "@types/pg": "^8.11.10",
     "prisma": "^6.16.2",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",

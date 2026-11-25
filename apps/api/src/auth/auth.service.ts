@@ -1,3 +1,4 @@
+import { withTx } from '../prisma/prisma.service';
 import { BadRequestException, HttpException, HttpStatus, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { hash, verify, Algorithm } from '@node-rs/argon2';
@@ -86,7 +87,7 @@ export class AuthService {
 
     this.limiter.clear(key);
     const expiresAt = new Date(Date.now() + SESSION_HOURS * 3600_000);
-    const session = await this.prisma.$transaction(async (tx) => {
+    const session = await withTx(this.prisma, async (tx) => {
       // A fresh login with the password also releases a counter lock.
       if (user.lockedAt) await tx.appUser.update({ where: { id: user.id }, data: { lockedAt: null } });
       return tx.session.create({ data: { userId: user.id, counterId: counter?.id ?? null, ip, userAgent: userAgent?.slice(0, 200) ?? null, expiresAt } });
@@ -167,7 +168,7 @@ export class AuthService {
     if (!(await verify(user.passwordHash, current))) throw new BadRequestException('Current password is wrong');
     checkPasswordStrength(next);
     if (current === next) throw new BadRequestException('Choose a password different from the current one');
-    await this.prisma.$transaction(async (tx) => {
+    await withTx(this.prisma, async (tx) => {
       await tx.appUser.update({
         where: { id: userId },
         data: { passwordHash: await hashPassword(next), mustChangePassword: false, tokenVersion: { increment: 1 } },

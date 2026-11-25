@@ -1,3 +1,4 @@
+import { withTx } from '../prisma/prisma.service';
 import { BadRequestException, Body, Controller, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { GstMode, Prisma, Role } from '@prisma/client';
 import { z } from 'zod';
@@ -96,7 +97,7 @@ export class AdminController {
     if (id === me.id && (!b.isActive || b.role !== me.role)) throw new BadRequestException('You cannot switch off or change the role of your own account');
     await this.assertAdminRemains(id, b.role, b.isActive);
     const roleOrActiveChanged = before.role !== b.role || before.isActive !== b.isActive;
-    const u = await this.prisma.$transaction(async (tx) => {
+    const u = await withTx(this.prisma, async (tx) => {
       const updated = await tx.appUser.update({
         where: { id },
         data: { ...b, ...(roleOrActiveChanged ? { tokenVersion: { increment: 1 } } : {}) },
@@ -117,7 +118,7 @@ export class AdminController {
     const b = parse(z.object({ password: z.string().min(1).max(128) }), body);
     checkPasswordStrength(b.password);
     const hashed = await hashPassword(b.password);
-    await this.prisma.$transaction(async (tx) => {
+    await withTx(this.prisma, async (tx) => {
       await tx.appUser.update({ where: { id }, data: { passwordHash: hashed, mustChangePassword: true, tokenVersion: { increment: 1 } } });
       await this.auth.revokeAll(id, 'PASSWORD_RESET', tx);
     });

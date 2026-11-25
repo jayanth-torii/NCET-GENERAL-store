@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Response } from 'express';
 import { SessionUser } from '../auth/auth.decorators';
+import { D, Dec, r2n, r3n, sum } from '../common/money';
 import { SettingsService } from '../common/settings.service';
 import { fmtDate, fmtDateTime, fyRange, istDate, istMonthRange, istRange } from '../common/time';
 import { PrismaService } from '../prisma/prisma.service';
@@ -11,7 +12,23 @@ import { reportToXlsx } from './render-xlsx';
 import { num, Report, ReportColumn } from './report-model';
 
 type Range = { start: Date; end: Date };
+type SaleRow = Prisma.SaleGetPayload<{ include: { counter: { select: { code: true } }; user: { select: { fullName: true } } } }>;
+type SalesSet = {
+  sales: SaleRow[];
+  items: Prisma.SaleItemGetPayload<{ include: { product: { select: { category: { select: { name: true } } } } } }>[];
+  payments: Prisma.SalePaymentGetPayload<object>[];
+  returns: Prisma.SalesReturnGetPayload<object>[];
+  saleOf: (id: bigint) => SaleRow;
+};
 const n = (v: unknown) => num(v);
+/** Hour of the day in IST (UTC+5:30) for a stored timestamp. */
+const istHour = (d: Date) => Math.floor((((d.getTime() / 3_600_000 + 5.5) % 24) + 24) % 24);
+/** Every YYYY-MM-DD from one date to another, inclusive. */
+function eachDay(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let t = Date.parse(`${from}T00:00:00Z`); t <= Date.parse(`${to}T00:00:00Z`); t += 86_400_000) out.push(new Date(t).toISOString().slice(0, 10));
+  return out;
+}
 
 @Injectable()
 export class ReportsService {
@@ -41,71 +58,114 @@ export class ReportsService {
     return { generatedAt: fmtDateTime(new Date()), generatedBy: user.fullName };
   }
 
-  // ---------------- shared sales queries ----------------
+  // ---------------- shared sales data (MongoDB) ----------------
+  // The PostgreSQL edition used one SQL aggregate per figure. On MongoDB the bills of a range are read
+  // once (with their lines, payments and returns) and every figure is worked out from that set in
+  // Decimal, so all report sections of one request agree exactly. The set is reused for 5 s so the
+  // sections of one report share a single read.
 
-  private userFilter(userId?: number) {
-    return userId ? Prisma.sql`AND s.user_id = ${userId}` : Prisma.empty;
+  private readonly cache = new Map<string, Promise<SalesSet>>();
+
+  private salesSet(r: Range, userId?: number): Promise<SalesSet> {
+    const key = `${r.start.toISOString()}|${r.end.toISOString()}|${userId ?? ''}`;
+    let p = this.cache.get(key);
+    if (!p) {
+      p = this.loadSales(r, userId);
+      this.cache.set(key, p);
+      setTimeout(() => this.cache.delete(key), 5000).unref?.();
+    }
+    return p;
+  }
+
+  private async loadSales(r: Range, userId?: number): Promise<SalesSet> {
+    const uf = userId ? { userId } : {};
+    const sales = await this.prisma.sale.findMany({
+      where: { billedAt: { gte: r.start, lt: r.end }, ...uf },
+      orderBy: { billedAt: 'asc' },
+      include: { counter: { select: { code: true } }, user: { select: { fullName: true } } },
+    });
+    const ids = sales.map((s) => s.id);
+    const [items, payments, returns] = await Promise.all([
+      ids.length ? this.prisma.saleItem.findMany({ where: { saleId: { in: ids } }, include: { product: { select: { category: { select: { name: true } } } } } }) : Promise.resolve([]),
+      ids.length ? this.prisma.salePayment.findMany({ where: { saleId: { in: ids } } }) : Promise.resolve([]),
+      this.prisma.salesReturn.findMany({ where: { createdAt: { gte: r.start, lt: r.end }, ...uf } }),
+    ]);
+    const byId = new Map(sales.map((s) => [String(s.id), s]));
+    return { sales, items, payments, returns, saleOf: (id: bigint) => byId.get(String(id))! };
   }
 
   private async salesHeadline(r: Range, userId?: number) {
-    const [row] = await this.prisma.$queryRaw<Record<string, Prisma.Decimal | bigint | null>[]>`
-      SELECT count(*) FILTER (WHERE s.status = 'COMPLETED') AS bills,
-             coalesce(sum(s.items_total) FILTER (WHERE s.status = 'COMPLETED'), 0) AS gross,
-             coalesce(sum(s.discount_total) FILTER (WHERE s.status = 'COMPLETED'), 0) AS discount,
-             coalesce(sum(s.round_off) FILTER (WHERE s.status = 'COMPLETED'), 0) AS round_off,
-             coalesce(sum(s.grand_total) FILTER (WHERE s.status = 'COMPLETED'), 0) AS net,
-             coalesce(sum(s.tax_total) FILTER (WHERE s.status = 'COMPLETED'), 0) AS tax,
-             count(*) FILTER (WHERE s.status = 'CANCELLED') AS cancelled,
-             coalesce(sum(s.grand_total) FILTER (WHERE s.status = 'CANCELLED'), 0) AS cancelled_amount,
-             count(*) FILTER (WHERE s.edit_count > 0) AS edited
-      FROM sale s WHERE s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(userId)}`;
-    const [ret] = await this.prisma.$queryRaw<{ count: bigint; total: Prisma.Decimal | null }[]>`
-      SELECT count(*) AS count, coalesce(sum(total), 0) AS total FROM sales_return s
-      WHERE s.created_at >= ${r.start} AND s.created_at < ${r.end} ${this.userFilter(userId)}`;
-    const [cost] = await this.prisma.$queryRaw<{ cost: Prisma.Decimal | null }[]>`
-      SELECT coalesce(sum(si.qty * si.cost_at_sale), 0) AS cost FROM sale_item si JOIN sale s ON s.id = si.sale_id
-      WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(userId)}`;
+    const { sales, items, returns, saleOf } = await this.salesSet(r, userId);
+    const done = sales.filter((s) => s.status === 'COMPLETED');
+    const cancelled = sales.filter((s) => s.status === 'CANCELLED');
+    const total = (rows: typeof sales, k: 'itemsTotal' | 'discountTotal' | 'roundOff' | 'grandTotal' | 'taxTotal') => r2n(sum(rows.map((s) => D(s[k]))));
+    const cost = sum(items.filter((i) => saleOf(i.saleId)?.status === 'COMPLETED').map((i) => D(i.qty).mul(i.costAtSale)));
     return {
-      bills: n(row.bills), gross: n(row.gross), discount: n(row.discount), roundOff: n(row.round_off), net: n(row.net), tax: n(row.tax),
-      cancelled: n(row.cancelled), cancelledAmount: n(row.cancelled_amount), edited: n(row.edited),
-      returns: n(ret.count), returnsTotal: n(ret.total), cost: n(cost.cost),
+      bills: done.length, gross: total(done, 'itemsTotal'), discount: total(done, 'discountTotal'), roundOff: total(done, 'roundOff'), net: total(done, 'grandTotal'), tax: total(done, 'taxTotal'),
+      cancelled: cancelled.length, cancelledAmount: total(cancelled, 'grandTotal'), edited: sales.filter((s) => s.editCount > 0).length,
+      returns: returns.length, returnsTotal: r2n(sum(returns.map((x) => D(x.total)))), cost: r2n(cost),
     };
   }
 
   private async byPaymentMode(r: Range, userId?: number) {
-    const rows = await this.prisma.$queryRaw<{ mode: string; collected: Prisma.Decimal; refunded: Prisma.Decimal; bills: bigint }[]>`
-      WITH c AS (
-        SELECT p.mode::text AS mode, sum(p.amount) AS amt, count(DISTINCT s.id) AS bills FROM sale_payment p JOIN sale s ON s.id = p.sale_id
-        WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(userId)} GROUP BY p.mode
-      ), rf AS (
-        SELECT s.refund_mode::text AS mode, sum(s.total) AS amt FROM sales_return s
-        WHERE s.created_at >= ${r.start} AND s.created_at < ${r.end} ${this.userFilter(userId)} GROUP BY s.refund_mode
-      )
-      SELECT m.mode, coalesce(c.amt, 0) AS collected, coalesce(rf.amt, 0) AS refunded, coalesce(c.bills, 0) AS bills
-      FROM (VALUES ('CASH'), ('UPI'), ('CARD')) AS m(mode)
-      LEFT JOIN c ON c.mode = m.mode LEFT JOIN rf ON rf.mode = m.mode`;
-    return rows.map((x) => ({ mode: x.mode, bills: n(x.bills), collected: n(x.collected), refunded: n(x.refunded), net: n(x.collected) - n(x.refunded) }));
+    const { payments, returns, saleOf } = await this.salesSet(r, userId);
+    const paid = payments.filter((p) => saleOf(p.saleId)?.status === 'COMPLETED');
+    return ['CASH', 'UPI', 'CARD'].map((mode) => {
+      const mine = paid.filter((p) => p.mode === mode);
+      const collected = r2n(sum(mine.map((p) => D(p.amount))));
+      const refunded = r2n(sum(returns.filter((x) => x.refundMode === mode).map((x) => D(x.total))));
+      return { mode, bills: new Set(mine.map((p) => String(p.saleId))).size, collected, refunded, net: r2n(D(collected).minus(refunded)) };
+    });
   }
 
   private async byCategory(r: Range, userId?: number) {
-    const rows = await this.prisma.$queryRaw<{ category: string; qty: Prisma.Decimal; amount: Prisma.Decimal; lines: bigint }[]>`
-      SELECT coalesce(c.name, 'Kits') AS category, sum(si.qty) AS qty, sum(si.line_total) AS amount, count(*) AS lines
-      FROM sale_item si JOIN sale s ON s.id = si.sale_id
-      LEFT JOIN product p ON p.id = si.product_id LEFT JOIN category c ON c.id = p.category_id
-      WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(userId)}
-      GROUP BY 1 ORDER BY amount DESC`;
-    return rows.map((x) => ({ category: x.category, lines: n(x.lines), qty: n(x.qty), amount: n(x.amount) }));
+    const { items, saleOf } = await this.salesSet(r, userId);
+    const m = new Map<string, { category: string; lines: number; qty: Dec; amount: Dec }>();
+    for (const i of items) {
+      if (saleOf(i.saleId)?.status !== 'COMPLETED') continue;
+      const category = i.product?.category.name ?? 'Kits';
+      const c = m.get(category) ?? { category, lines: 0, qty: D(0), amount: D(0) };
+      c.lines++;
+      c.qty = c.qty.plus(i.qty);
+      c.amount = c.amount.plus(i.lineTotal);
+      m.set(category, c);
+    }
+    return [...m.values()].sort((a, b) => b.amount.cmp(a.amount)).map((c) => ({ category: c.category, lines: c.lines, qty: r3n(c.qty), amount: r2n(c.amount) }));
   }
 
   private async byItem(r: Range, limit: number | null, userId?: number) {
-    const rows = await this.prisma.$queryRaw<{ code: string; name: string; qty: Prisma.Decimal; amount: Prisma.Decimal; bills: bigint; cost: Prisma.Decimal }[]>`
-      SELECT si.code_snapshot AS code, max(si.name_snapshot) AS name, sum(si.qty) AS qty, sum(si.line_total) AS amount,
-             count(DISTINCT s.id) AS bills, sum(si.qty * si.cost_at_sale) AS cost
-      FROM sale_item si JOIN sale s ON s.id = si.sale_id
-      WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(userId)}
-      GROUP BY si.code_snapshot, (si.kit_id IS NOT NULL)
-      ORDER BY amount DESC ${limit ? Prisma.sql`LIMIT ${limit}` : Prisma.empty}`;
-    return rows.map((x) => ({ code: x.code, name: x.name, bills: n(x.bills), qty: n(x.qty), amount: n(x.amount), margin: n(x.amount) - n(x.cost) }));
+    const { items, saleOf } = await this.salesSet(r, userId);
+    const m = new Map<string, { code: string; name: string; qty: Dec; amount: Dec; cost: Dec; bills: Set<string> }>();
+    for (const i of items) {
+      if (saleOf(i.saleId)?.status !== 'COMPLETED') continue;
+      const key = `${i.codeSnapshot}|${i.kitId !== null}`;
+      const c = m.get(key) ?? { code: i.codeSnapshot, name: i.nameSnapshot, qty: D(0), amount: D(0), cost: D(0), bills: new Set<string>() };
+      if (i.nameSnapshot > c.name) c.name = i.nameSnapshot; // max(name_snapshot), as before
+      c.qty = c.qty.plus(i.qty);
+      c.amount = c.amount.plus(i.lineTotal);
+      c.cost = c.cost.plus(D(i.qty).mul(i.costAtSale));
+      c.bills.add(String(i.saleId));
+      m.set(key, c);
+    }
+    const rows = [...m.values()].sort((a, b) => b.amount.cmp(a.amount));
+    return (limit ? rows.slice(0, limit) : rows).map((x) => ({ code: x.code, name: x.name, bills: x.bills.size, qty: r3n(x.qty), amount: r2n(x.amount), margin: r2n(x.amount.minus(x.cost)) }));
+  }
+
+  /** Bills of a range grouped by a key (counter, cashier, hour): completed count, net, discount, cancelled. */
+  private async groupSales(r: Range, userId: number | undefined, keyOf: (s: SaleRow) => string) {
+    const { sales } = await this.salesSet(r, userId);
+    const g = new Map<string, { key: string; bills: number; net: Dec; discount: Dec; cancelled: number }>();
+    for (const x of sales) {
+      const key = keyOf(x);
+      const c = g.get(key) ?? { key, bills: 0, net: D(0), discount: D(0), cancelled: 0 };
+      if (x.status === 'COMPLETED') {
+        c.bills++;
+        c.net = c.net.plus(x.grandTotal);
+        c.discount = c.discount.plus(x.discountTotal);
+      } else c.cancelled++;
+      g.set(key, c);
+    }
+    return [...g.values()].sort((a, b) => a.key.localeCompare(b.key)).map((c) => ({ key: c.key, bills: c.bills, net: r2n(c.net), discount: r2n(c.discount), cancelled: c.cancelled }));
   }
 
   // ---------------- Daily (FR-10) ----------------
@@ -114,20 +174,27 @@ export class ReportsService {
     const r = istRange(date, date);
     const uid = ownOnly ? user.id : undefined;
     const h = await this.salesHeadline(r, uid);
-    const digital = await this.prisma.$queryRaw<{ billed_at: Date; bill_no: string; mode: string; reference: string | null; amount: Prisma.Decimal; status: string }[]>`
-      SELECT s.billed_at, s.bill_no, p.mode::text AS mode, p.reference, p.amount, s.status::text AS status
-      FROM sale_payment p JOIN sale s ON s.id = p.sale_id
-      WHERE p.mode <> 'CASH' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(uid)}
-      ORDER BY s.billed_at`;
+    const set = await this.salesSet(r, uid);
+    const digital = set.payments
+      .filter((p) => p.mode !== 'CASH')
+      .map((p) => {
+        const sl = set.saleOf(p.saleId);
+        return { billed_at: sl.billedAt, bill_no: sl.billNo, mode: p.mode as string, reference: p.reference, amount: p.amount, status: sl.status as string };
+      })
+      .sort((a, b) => a.billed_at.getTime() - b.billed_at.getTime());
     // Things a manager should check: every action that moved money or stock outside a normal sale.
     const exceptions = ownOnly
       ? []
-      : await this.prisma.$queryRaw<{ at: Date; who: string | null; action: string; detail: Prisma.JsonValue; entity_id: string | null }[]>`
-          SELECT a.created_at AS at, u.full_name AS who, a.action, coalesce(a.after, a.before) AS detail, a.entity_id
-          FROM audit_log a LEFT JOIN app_user u ON u.id = a.user_id
-          WHERE a.created_at >= ${r.start} AND a.created_at < ${r.end}
-            AND a.action IN ('SALE_EDIT','SALE_CANCEL','SALES_RETURN','PRICE_OVERRIDE','HOLD_DISCARD','RECEIPT_REPRINT','STOCK_ADJUST','STOCK_ADJUST_APPROVE','PURCHASE_CANCEL','PURCHASE_RETURN','PRICE_CHANGE')
-          ORDER BY a.created_at`;
+      : (
+          await this.prisma.auditLog.findMany({
+            where: {
+              createdAt: { gte: r.start, lt: r.end },
+              action: { in: ['SALE_EDIT', 'SALE_CANCEL', 'SALES_RETURN', 'PRICE_OVERRIDE', 'HOLD_DISCARD', 'RECEIPT_REPRINT', 'STOCK_ADJUST', 'STOCK_ADJUST_APPROVE', 'PURCHASE_CANCEL', 'PURCHASE_RETURN', 'PRICE_CHANGE'] },
+            },
+            orderBy: { createdAt: 'asc' },
+            include: { user: { select: { fullName: true } } },
+          })
+        ).map((a) => ({ at: a.createdAt, who: a.user?.fullName ?? null, action: a.action, detail: (a.after ?? a.before) as Prisma.JsonValue, entity_id: a.entityId }));
     const describe = (action: string, d: Record<string, unknown>) => {
       const money = (v: unknown) => `₹${n(v).toFixed(2)}`;
       switch (action) {
@@ -162,23 +229,14 @@ export class ReportsService {
       return { time: fmtDateTime(e.at).slice(11), who: e.who ?? '', what: describe(e.action, e.action === 'SALE_EDIT' ? full : d), action: e.action };
     });
     const [counters, cashiers, modes, cats, top, hours] = await Promise.all([
-      this.prisma.$queryRaw<{ code: string; bills: bigint; net: Prisma.Decimal; cancelled: bigint }[]>`
-        SELECT c.code, count(*) FILTER (WHERE s.status = 'COMPLETED') AS bills, coalesce(sum(s.grand_total) FILTER (WHERE s.status = 'COMPLETED'), 0) AS net,
-               count(*) FILTER (WHERE s.status = 'CANCELLED') AS cancelled
-        FROM sale s JOIN counter c ON c.id = s.counter_id
-        WHERE s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(uid)} GROUP BY c.code ORDER BY c.code`,
-      this.prisma.$queryRaw<{ name: string; bills: bigint; net: Prisma.Decimal; discount: Prisma.Decimal }[]>`
-        SELECT u.full_name AS name, count(*) FILTER (WHERE s.status = 'COMPLETED') AS bills, coalesce(sum(s.grand_total) FILTER (WHERE s.status = 'COMPLETED'), 0) AS net,
-               coalesce(sum(s.discount_total) FILTER (WHERE s.status = 'COMPLETED'), 0) AS discount
-        FROM sale s JOIN app_user u ON u.id = s.user_id
-        WHERE s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(uid)} GROUP BY u.full_name ORDER BY u.full_name`,
+      this.groupSales(r, uid, (x) => x.counter.code).then((g) => g.map((x) => ({ code: x.key, bills: x.bills, net: x.net, cancelled: x.cancelled }))),
+      this.groupSales(r, uid, (x) => x.user.fullName).then((g) => g.map((x) => ({ name: x.key, bills: x.bills, net: x.net, discount: x.discount }))),
       this.byPaymentMode(r, uid),
       this.byCategory(r, uid),
       this.byItem(r, 20, uid),
-      this.prisma.$queryRaw<{ hour: number; bills: bigint; net: Prisma.Decimal }[]>`
-        SELECT extract(hour FROM s.billed_at AT TIME ZONE 'Asia/Kolkata')::int AS hour, count(*) AS bills, sum(s.grand_total) AS net
-        FROM sale s WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end} ${this.userFilter(uid)}
-        GROUP BY 1 ORDER BY 1`,
+      this.groupSales(r, uid, (x) => String(istHour(x.billedAt)).padStart(2, '0')).then((g) =>
+        g.filter((x) => x.bills > 0).map((x) => ({ hour: Number(x.key), bills: x.bills, net: x.net })),
+      ),
     ]);
     const modeTotals = modes.reduce((a, m) => ({ collected: a.collected + m.collected, refunded: a.refunded + m.refunded, net: a.net + m.net, bills: a.bills + m.bills }), { collected: 0, refunded: 0, net: 0, bills: 0 });
     const isManager = !ownOnly;
@@ -273,22 +331,17 @@ export class ReportsService {
     const r = { start: m.start, end: m.end };
     const h = await this.salesHeadline(r);
     const [days, cats, items, modes] = await Promise.all([
-      this.prisma.$queryRaw<{ day: Date; bills: bigint; gross: Prisma.Decimal; discount: Prisma.Decimal; net: Prisma.Decimal; returns: Prisma.Decimal; cancelled: bigint }[]>`
-        WITH d AS (SELECT generate_series(${m.from}::date, ${m.to}::date, interval '1 day')::date AS day),
-        s AS (
-          SELECT (billed_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
-                 count(*) FILTER (WHERE status = 'COMPLETED') AS bills,
-                 sum(items_total) FILTER (WHERE status = 'COMPLETED') AS gross,
-                 sum(discount_total) FILTER (WHERE status = 'COMPLETED') AS discount,
-                 sum(grand_total) FILTER (WHERE status = 'COMPLETED') AS net,
-                 count(*) FILTER (WHERE status = 'CANCELLED') AS cancelled
-          FROM sale WHERE billed_at >= ${r.start} AND billed_at < ${r.end} GROUP BY 1
-        ),
-        rt AS (SELECT (created_at AT TIME ZONE 'Asia/Kolkata')::date AS day, sum(total) AS returns FROM sales_return
-               WHERE created_at >= ${r.start} AND created_at < ${r.end} GROUP BY 1)
-        SELECT d.day, coalesce(s.bills, 0) AS bills, coalesce(s.gross, 0) AS gross, coalesce(s.discount, 0) AS discount,
-               coalesce(s.net, 0) AS net, coalesce(rt.returns, 0) AS returns, coalesce(s.cancelled, 0) AS cancelled
-        FROM d LEFT JOIN s ON s.day = d.day LEFT JOIN rt ON rt.day = d.day ORDER BY d.day`,
+      this.salesSet(r).then(({ sales, returns }) =>
+        eachDay(m.from, m.to).map((day) => {
+          const mine = sales.filter((x) => istDate(x.billedAt) === day);
+          const done = mine.filter((x) => x.status === 'COMPLETED');
+          const t = (k: 'itemsTotal' | 'discountTotal' | 'grandTotal') => r2n(sum(done.map((x) => D(x[k]))));
+          return {
+            day: new Date(`${day}T00:00:00Z`), bills: done.length, gross: t('itemsTotal'), discount: t('discountTotal'), net: t('grandTotal'),
+            returns: r2n(sum(returns.filter((x) => istDate(x.createdAt) === day).map((x) => D(x.total)))), cancelled: mine.length - done.length,
+          };
+        }),
+      ),
       this.byCategory(r),
       this.byItem(r, null),
       this.byPaymentMode(r),
@@ -406,24 +459,39 @@ export class ReportsService {
   /** Kit sales by section. The section is the "Customer" typed on the bill (for example "II CSE A"). */
   async kitSales(from: string, to: string, user: SessionUser): Promise<Report> {
     const r = istRange(from, to);
-    const rows = await this.prisma.$queryRaw<{ code: string; name: string; section: string; bills: bigint; qty: Prisma.Decimal; amount: Prisma.Decimal; returned: Prisma.Decimal }[]>`
-      SELECT k.code, k.name, coalesce(nullif(trim(s.customer_name), ''), '(no section given)') AS section,
-             count(DISTINCT s.id) AS bills, sum(si.qty) AS qty, sum(si.line_total) AS amount,
-             coalesce(sum((SELECT sum(ri.qty) FROM sales_return_item ri WHERE ri.sale_item_id = si.id)), 0) AS returned
-      FROM sale_item si JOIN sale s ON s.id = si.sale_id JOIN kit k ON k.id = si.kit_id
-      WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end}
-      GROUP BY k.code, k.name, 3 ORDER BY k.name, 3`;
+    const set = await this.salesSet(r);
+    const kitLines = set.items.filter((i) => i.kitId !== null && set.saleOf(i.saleId)?.status === 'COMPLETED');
+    const [kits, retLines] = await Promise.all([
+      this.prisma.kit.findMany({ where: { id: { in: [...new Set(kitLines.map((i) => i.kitId!))] } }, select: { id: true, code: true, name: true } }),
+      this.prisma.salesReturnItem.findMany({ where: { saleItemId: { in: kitLines.map((i) => i.id) } }, select: { saleItemId: true, qty: true } }),
+    ]);
+    const kitOf = new Map(kits.map((k) => [k.id, k]));
+    const g = new Map<string, { code: string; name: string; section: string; bills: Set<string>; qty: Dec; amount: Dec; returned: Dec }>();
+    for (const i of kitLines) {
+      const k = kitOf.get(i.kitId!)!;
+      const section = set.saleOf(i.saleId).customerName?.trim() || '(no section given)';
+      const key = `${k.code}|${section}`;
+      const c = g.get(key) ?? { code: k.code, name: k.name, section, bills: new Set<string>(), qty: D(0), amount: D(0), returned: D(0) };
+      c.bills.add(String(i.saleId));
+      c.qty = c.qty.plus(i.qty);
+      c.amount = c.amount.plus(i.lineTotal);
+      c.returned = c.returned.plus(sum(retLines.filter((x) => x.saleItemId === i.id).map((x) => D(x.qty))));
+      g.set(key, c);
+    }
+    const rows = [...g.values()]
+      .sort((a, b) => a.name.localeCompare(b.name) || a.section.localeCompare(b.section))
+      .map((x) => ({ code: x.code, name: x.name, section: x.section, bills: x.bills.size, qty: r3n(x.qty), amount: r2n(x.amount), returned: r3n(x.returned) }));
     const data = rows.map((x) => ({ code: x.code, name: x.name, section: x.section, bills: n(x.bills), qty: n(x.qty), returned: n(x.returned), amount: n(x.amount) }));
-    const sum = (k: 'qty' | 'amount' | 'returned' | 'bills') => data.reduce((a, b) => a + b[k], 0);
+    const kitTotal = (k: 'qty' | 'amount' | 'returned' | 'bills') => data.reduce((a, b) => a + b[k], 0);
     return {
       title: 'Section kit sales',
       subtitle: `${fmtDate(from)} to ${fmtDate(to)}`,
       fileName: `section_kits_${from}_to_${to}`,
       ...this.meta(user),
       summary: [
-        { label: 'Kits sold', value: sum('qty'), type: 'qty' },
-        { label: 'Kits returned', value: sum('returned'), type: 'qty' },
-        { label: 'Amount', value: sum('amount'), type: 'money' },
+        { label: 'Kits sold', value: kitTotal('qty'), type: 'qty' },
+        { label: 'Kits returned', value: kitTotal('returned'), type: 'qty' },
+        { label: 'Amount', value: kitTotal('amount'), type: 'money' },
         { label: 'Sections', value: new Set(data.map((d) => d.section)).size, type: 'int' },
       ],
       sections: [
@@ -434,7 +502,7 @@ export class ReportsService {
             { key: 'qty', label: 'Kits sold', type: 'qty' }, { key: 'returned', label: 'Returned', type: 'qty' }, { key: 'amount', label: 'Amount', type: 'money' },
           ],
           rows: data,
-          totals: { code: 'Total', bills: sum('bills'), qty: sum('qty'), returned: sum('returned'), amount: sum('amount') },
+          totals: { code: 'Total', bills: kitTotal('bills'), qty: kitTotal('qty'), returned: kitTotal('returned'), amount: kitTotal('amount') },
           note: 'Type the section (for example "II CSE A") in the Customer box when billing a kit, so it is counted against that section.',
         },
       ],
@@ -553,21 +621,21 @@ export class ReportsService {
     const today = istDate();
     const limit = new Date(`${today}T00:00:00Z`);
     limit.setUTCDate(limit.getUTCDate() + days);
-    const rows = await this.prisma.$queryRaw<
-      { code: string; name: string; unit: string; batch: string | null; expiry: Date; qty: Prisma.Decimal; grn: string | null; supplier: string; on_hand: Prisma.Decimal; product_id: number }[]
-    >`
-      SELECT p.id AS product_id, p.code, p.name, u.code AS unit, pi.batch, pi.expiry, pi.base_qty - coalesce(r.ret, 0) AS qty,
-             pu.purchase_no AS grn, s.name AS supplier, coalesce(ps.on_hand, 0) AS on_hand
-      FROM purchase_item pi
-      JOIN purchase pu ON pu.id = pi.purchase_id AND pu.status = 'POSTED'
-      JOIN product p ON p.id = pi.product_id
-      JOIN unit u ON u.id = p.unit_id
-      JOIN supplier s ON s.id = pu.supplier_id
-      LEFT JOIN product_stock ps ON ps.product_id = p.id
-      LEFT JOIN (SELECT purchase_item_id, sum(base_qty) AS ret FROM purchase_return_item GROUP BY 1) r ON r.purchase_item_id = pi.id
-      WHERE pi.expiry IS NOT NULL AND pi.expiry <= ${limit}::date
-        ${inStockOnly ? Prisma.sql`AND coalesce(ps.on_hand, 0) > 0` : Prisma.empty}
-      ORDER BY pi.expiry, p.name`;
+    const batches = await this.prisma.purchaseItem.findMany({
+      where: { expiry: { not: null, lte: limit }, purchase: { is: { status: 'POSTED' } } },
+      include: {
+        purchase: { select: { purchaseNo: true, supplier: { select: { name: true } } } },
+        product: { select: { id: true, code: true, name: true, unit: { select: { code: true } }, stock: { select: { onHand: true } } } },
+        returnLines: { select: { baseQty: true } },
+      },
+    });
+    const rows = batches
+      .map((b) => ({
+        product_id: b.product.id, code: b.product.code, name: b.product.name, unit: b.product.unit.code, batch: b.batch, expiry: b.expiry!,
+        qty: r3n(D(b.baseQty).minus(sum(b.returnLines.map((x) => D(x.baseQty))))), grn: b.purchase.purchaseNo, supplier: b.purchase.supplier.name, on_hand: b.product.stock?.onHand ?? 0,
+      }))
+      .filter((x) => !inStockOnly || x.on_hand > 0)
+      .sort((a, b) => a.expiry.getTime() - b.expiry.getTime() || a.name.localeCompare(b.name));
     const t0 = Date.parse(`${today}T00:00:00Z`);
     const out = rows.map((x) => {
       const left = Math.round((x.expiry.getTime() - t0) / 86_400_000);
@@ -640,15 +708,21 @@ export class ReportsService {
   async gstInput(from: string, to: string, user: SessionUser): Promise<Report> {
     const settings = await this.settings.get();
     const storeState = settings.gstin?.slice(0, 2) ?? null;
-    const lines = await this.prisma.$queryRaw<
-      { grn: string; invoice_date: Date; invoice_no: string; supplier: string; gstin: string | null; rate: Prisma.Decimal; taxable: Prisma.Decimal; tax: Prisma.Decimal }[]
-    >`
-      SELECT pu.purchase_no AS grn, pu.invoice_date, pu.supplier_invoice_no AS invoice_no, s.name AS supplier, s.gstin, pi.gst_rate AS rate,
-             sum(pi.line_total - pi.tax_amount) AS taxable, sum(pi.tax_amount) AS tax
-      FROM purchase_item pi JOIN purchase pu ON pu.id = pi.purchase_id JOIN supplier s ON s.id = pu.supplier_id
-      WHERE pu.status = 'POSTED' AND pu.invoice_date >= ${from}::date AND pu.invoice_date <= ${to}::date
-      GROUP BY pu.id, s.id, pi.gst_rate
-      ORDER BY pu.invoice_date, pu.purchase_no, pi.gst_rate`;
+    const posted = await this.prisma.purchase.findMany({
+      where: { status: 'POSTED', invoiceDate: { gte: new Date(`${from}T00:00:00Z`), lte: new Date(`${to}T00:00:00Z`) } },
+      include: { supplier: { select: { name: true, gstin: true } }, items: { select: { gstRate: true, lineTotal: true, taxAmount: true } } },
+    });
+    const lines = posted
+      .flatMap((pu) =>
+        [...new Set(pu.items.map((i) => i.gstRate))].map((rate) => {
+          const mine = pu.items.filter((i) => i.gstRate === rate);
+          return {
+            grn: pu.purchaseNo ?? '', invoice_date: pu.invoiceDate, invoice_no: pu.supplierInvoiceNo, supplier: pu.supplier.name, gstin: pu.supplier.gstin, rate,
+            taxable: r2n(sum(mine.map((i) => D(i.lineTotal).minus(i.taxAmount)))), tax: r2n(sum(mine.map((i) => D(i.taxAmount)))),
+          };
+        }),
+      )
+      .sort((a, b) => a.invoice_date.getTime() - b.invoice_date.getTime() || a.grn.localeCompare(b.grn) || a.rate - b.rate);
     const inter = (gstin: string | null) => !!(storeState && gstin && gstin.slice(0, 2) !== storeState);
     const rows = lines.map((x) => {
       const taxable = n(x.taxable);
@@ -659,15 +733,22 @@ export class ReportsService {
       };
     });
     const r = istRange(from, to);
-    const ret = await this.prisma.$queryRaw<
-      { return_no: string; created_at: Date; grn: string | null; supplier: string; gstin: string | null; rate: Prisma.Decimal; amount: Prisma.Decimal; tax: Prisma.Decimal }[]
-    >`
-      SELECT pr.return_no, pr.created_at, pu.purchase_no AS grn, s.name AS supplier, s.gstin, pi.gst_rate AS rate,
-             sum(ri.amount) AS amount, sum(CASE WHEN pi.line_total = 0 THEN 0 ELSE round(ri.amount * pi.tax_amount / pi.line_total, 2) END) AS tax
-      FROM purchase_return_item ri JOIN purchase_return pr ON pr.id = ri.return_id JOIN purchase_item pi ON pi.id = ri.purchase_item_id
-      JOIN purchase pu ON pu.id = pr.purchase_id JOIN supplier s ON s.id = pr.supplier_id
-      WHERE pr.created_at >= ${r.start} AND pr.created_at < ${r.end}
-      GROUP BY pr.id, pu.id, s.id, pi.gst_rate ORDER BY pr.created_at, pi.gst_rate`;
+    const prs = await this.prisma.purchaseReturn.findMany({
+      where: { createdAt: { gte: r.start, lt: r.end } },
+      include: { purchase: { select: { purchaseNo: true } }, supplier: { select: { name: true, gstin: true } }, items: { include: { purchaseItem: { select: { gstRate: true, lineTotal: true, taxAmount: true } } } } },
+    });
+    const ret = prs
+      .flatMap((pr) =>
+        [...new Set(pr.items.map((i) => i.purchaseItem.gstRate))].map((rate) => {
+          const mine = pr.items.filter((i) => i.purchaseItem.gstRate === rate);
+          return {
+            return_no: pr.returnNo, created_at: pr.createdAt, grn: pr.purchase.purchaseNo, supplier: pr.supplier.name, gstin: pr.supplier.gstin, rate,
+            amount: r2n(sum(mine.map((i) => D(i.amount)))),
+            tax: r2n(sum(mine.map((i) => (i.purchaseItem.lineTotal === 0 ? D(0) : D(i.amount).mul(i.purchaseItem.taxAmount).div(i.purchaseItem.lineTotal).toDecimalPlaces(2))))),
+          };
+        }),
+      )
+      .sort((a, b) => a.created_at.getTime() - b.created_at.getTime() || a.rate - b.rate);
     const retRows = ret.map((x) => {
       const tax = n(x.tax);
       const total = n(x.amount);
@@ -715,29 +796,37 @@ export class ReportsService {
   async gstOutput(from: string, to: string, user: SessionUser): Promise<Report> {
     const settings = await this.settings.get();
     const r = istRange(from, to);
-    const lines = await this.prisma.$queryRaw<
-      { bill_no: string; billed_at: Date; customer: string | null; rate: string; total: Prisma.Decimal; tax: Prisma.Decimal }[]
-    >`
-      SELECT s.bill_no, s.billed_at, s.customer_name AS customer,
-             CASE WHEN si.kit_id IS NOT NULL THEN 'Kit (mixed)' ELSE trim(to_char(si.gst_rate, 'FM990.99'), '.') || '%' END AS rate,
-             sum(si.line_total) AS total, sum(si.tax_amount) AS tax
-      FROM sale_item si JOIN sale s ON s.id = si.sale_id
-      WHERE s.status = 'COMPLETED' AND s.billed_at >= ${r.start} AND s.billed_at < ${r.end}
-      GROUP BY s.id, 4 ORDER BY s.billed_at, 4`;
+    const set = await this.salesSet(r);
+    const rateLabel = (i: { kitId: number | null; gstRate: number }) => (i.kitId !== null ? 'Kit (mixed)' : `${Number(i.gstRate)}%`);
+    const lines = set.sales
+      .filter((x) => x.status === 'COMPLETED')
+      .flatMap((sl) => {
+        const mine = set.items.filter((i) => String(i.saleId) === String(sl.id));
+        return [...new Set(mine.map(rateLabel))].sort().map((rate) => {
+          const it = mine.filter((i) => rateLabel(i) === rate);
+          return { bill_no: sl.billNo, billed_at: sl.billedAt, customer: sl.customerName, rate, total: r2n(sum(it.map((i) => D(i.lineTotal)))), tax: r2n(sum(it.map((i) => D(i.taxAmount)))) };
+        });
+      });
     const rows = lines.map((x) => {
       const total = n(x.total);
       const tax = n(x.tax);
       return { billNo: x.bill_no, date: fmtDate(x.billed_at), customer: x.customer ?? '', rate: x.rate, taxable: Math.round((total - tax) * 100) / 100, ...ReportsService.splitTax(tax, false), tax, total };
     });
-    const ret = await this.prisma.$queryRaw<
-      { return_no: string; created_at: Date; bill_no: string; rate: string; amount: Prisma.Decimal; tax: Prisma.Decimal }[]
-    >`
-      SELECT sr.return_no, sr.created_at, s.bill_no,
-             CASE WHEN si.kit_id IS NOT NULL THEN 'Kit (mixed)' ELSE trim(to_char(si.gst_rate, 'FM990.99'), '.') || '%' END AS rate,
-             sum(ri.amount) AS amount, sum(CASE WHEN si.line_total = 0 THEN 0 ELSE round(ri.amount * si.tax_amount / si.line_total, 2) END) AS tax
-      FROM sales_return_item ri JOIN sales_return sr ON sr.id = ri.return_id JOIN sale_item si ON si.id = ri.sale_item_id JOIN sale s ON s.id = sr.sale_id
-      WHERE sr.created_at >= ${r.start} AND sr.created_at < ${r.end}
-      GROUP BY sr.id, s.id, 4 ORDER BY sr.created_at, 4`;
+    const srs = await this.prisma.salesReturn.findMany({
+      where: { createdAt: { gte: r.start, lt: r.end } },
+      orderBy: { createdAt: 'asc' },
+      include: { sale: { select: { billNo: true } }, items: { include: { saleItem: { select: { kitId: true, gstRate: true, lineTotal: true, taxAmount: true } } } } },
+    });
+    const ret = srs.flatMap((sr) =>
+      [...new Set(sr.items.map((i) => rateLabel(i.saleItem)))].sort().map((rate) => {
+        const mine = sr.items.filter((i) => rateLabel(i.saleItem) === rate);
+        return {
+          return_no: sr.returnNo, created_at: sr.createdAt, bill_no: sr.sale.billNo, rate,
+          amount: r2n(sum(mine.map((i) => D(i.amount)))),
+          tax: r2n(sum(mine.map((i) => (i.saleItem.lineTotal === 0 ? D(0) : D(i.amount).mul(i.saleItem.taxAmount).div(i.saleItem.lineTotal).toDecimalPlaces(2))))),
+        };
+      }),
+    );
     const retRows = ret.map((x) => {
       const total = n(x.amount);
       const tax = n(x.tax);
