@@ -151,7 +151,15 @@ async function main() {
   // the hold is saved when its dialog closes (a cloud database takes longer than the old fixed 400 ms)
   await page.getByRole('dialog').waitFor({ state: 'detached', timeout: 20000 });
   await page.keyboard.press('F7');
-  await page.waitForSelector(`text=Waiting ${T}`);
+  try {
+    await page.waitForSelector(`text=Waiting ${T}`);
+  } catch (e) {
+    // keep evidence of what the screen showed when the held bill did not appear
+    await page.screenshot({ path: join(SHOTS, 'fail-recall.png') }).catch(() => undefined);
+    const dialog = await page.getByRole('dialog').allInnerTexts().catch(() => []);
+    console.log('recall step failed; dialogs on screen:', JSON.stringify(dialog).slice(0, 600));
+    throw e;
+  }
   await page.getByRole('dialog').locator('li', { hasText: `Waiting ${T}` }).getByRole('button', { name: 'Recall', exact: true }).click();
   await page.waitForSelector(`text=UI NOTEBOOK ${T}`);
   check(true, 'F6 holds and F7 recalls a bill');

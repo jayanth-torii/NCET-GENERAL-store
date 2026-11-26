@@ -1,0 +1,58 @@
+// Append-only stock ledger and manager-approved stock adjustments.
+
+enum MovementKind {
+  OPENING
+  PURCHASE
+  SALE
+  SALE_RETURN
+  PURCHASE_RETURN
+  ADJUSTMENT
+  CANCEL
+}
+
+enum AdjustmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model StockMovement {
+  id          BigInt       @id @default(0) @map("_id")
+  productId   Int          @map("product_id")
+  kind        MovementKind
+  qty         Float // signed: + in, - out
+  unitCost    Float?       @map("unit_cost")
+  refType     String       @map("ref_type") // SALE, PURCHASE, SALES_RETURN, PURCHASE_RETURN, ADJUSTMENT, OPENING
+  refId       BigInt       @map("ref_id")
+  note        String?
+  createdById Int?         @map("created_by")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  product   Product  @relation(fields: [productId], references: [id])
+  createdBy AppUser? @relation(fields: [createdById], references: [id])
+
+  @@index([productId, createdAt])
+  @@index([createdAt])
+  @@index([refType, refId])
+  @@map("stock_movement")
+}
+
+model StockAdjustment {
+  id            Int              @id @default(0) @map("_id")
+  productId     Int              @map("product_id")
+  qtyChange     Float            @map("qty_change")
+  reason        String
+  status        AdjustmentStatus @default(PENDING)
+  requestedById Int              @map("requested_by")
+  decidedById   Int?             @map("decided_by")
+  decisionNote  String?          @map("decision_note")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  decidedAt     DateTime?        @map("decided_at")
+
+  product     Product  @relation(fields: [productId], references: [id])
+  requestedBy AppUser  @relation("AdjRequestedBy", fields: [requestedById], references: [id])
+  decidedBy   AppUser? @relation("AdjDecidedBy", fields: [decidedById], references: [id])
+
+  @@index([status])
+  @@map("stock_adjustment")
+}

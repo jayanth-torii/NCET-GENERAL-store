@@ -4,24 +4,24 @@
   "private": true,
   "description": "NCET General Store POS v2 - browser-based multi-counter point of sale",
   "workspaces": [
-    "apps/api",
-    "apps/web"
+    "backend",
+    "frontend"
   ],
   "scripts": {
     "db:up": "docker compose -f ops/docker-compose.yml up -d db",
     "db:down": "docker compose -f ops/docker-compose.yml down",
-    "dev:api": "npm run dev -w apps/api",
-    "dev:web": "npm run dev -w apps/web",
-    "build": "npm run build -w apps/api && npm run build -w apps/web",
-    "start": "npm run start -w apps/api",
-    "test": "npm run test -w apps/api",
-    "migrate": "npm run migrate:deploy -w apps/api",
-    "seed": "npm run seed -w apps/api",
-    "seed:demo": "npm run seed:demo -w apps/api",
+    "dev:api": "npm run dev -w backend",
+    "dev:web": "npm run dev -w frontend",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "start": "npm run start -w backend",
+    "test": "npm run test -w backend",
+    "migrate": "npm run migrate:deploy -w backend",
+    "seed": "npm run seed -w backend",
+    "seed:demo": "npm run seed:demo -w backend",
     "smoke": "node scripts/smoke-test.mjs",
     "rush": "node scripts/rush-test.mjs",
-    "migrate:from-postgres": "npm run migrate:from-postgres -w apps/api --",
-    "check:stock": "npm run check:stock -w apps/api"
+    "migrate:from-postgres": "npm run migrate:from-postgres -w backend --",
+    "check:stock": "npm run check:stock -w backend"
   },
   "devDependencies": {
     "playwright-core": "^1.55.0"

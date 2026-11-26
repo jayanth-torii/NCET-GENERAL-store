@@ -459,27 +459,39 @@ function tradeoffs() {
 
 // ───────────────────────────── layout tree ─────────────────────────────
 function layout() {
-  const a = new Art(1200, 360, 'Repository layout: apps/api, apps/web, docs/readme, ops, scripts');
-  const C = 14;
   const rows = [
-    [0, '📁', 'apps/api', 'NestJS + Prisma (MongoDB) · sales, purchase, stock, reports, auth'],
-    [1, '📂', 'src/prisma', 'client rules: ids, append-only, nulls · partial indexes'],
-    [1, '📂', 'src/common', 'money, stock ledger, bill numbers, keyed locks'],
-    [1, '📂', 'prisma/postgres-legacy', 'old SQL schema + migrations'],
-    [0, '📁', 'apps/web', 'React 19 + Vite + Tailwind · NCET ERP theme'],
+    [0, '📁', 'backend', 'NestJS + Prisma (MongoDB) · API and built web app on :3000'],
+    [1, '📂', 'src/config', 'database client, indexes + id sequences, auth module'],
+    [1, '📂', 'src/controllers', '<feature>/controller.ts — sales, purchases, stock, reports…'],
+    [1, '📂', 'src/middleware', 'auth guard, role decorators, error filter'],
+    [1, '📂', 'src/models', 'schema.prisma + <feature>/model.prisma (split schema)'],
+    [1, '📂', 'src/routes', '<feature>/route.ts + globalRoutes.ts (order matters)'],
+    [1, '📂', 'src/services', '<feature>/service.ts — bills, GRNs, stock, reports'],
+    [1, '📂', 'src/utils', 'money, time, stock ledger, locks, PDF + Excel'],
+    [1, '📂', 'src/validators', '<feature>/validator.ts + shared validate.ts'],
+    [1, '📂', 'scripts · postgres-legacy', 'seed, migrate, check:stock · old SQL schema'],
+    [0, '📁', 'frontend', 'React 19 + Vite + Tailwind · NCET ERP theme'],
+    [1, '📂', 'src/app', 'app shell, page routes, auth provider'],
+    [1, '📂', 'src/assets', 'css/index.css, images/showcase sprites'],
+    [1, '📂', 'src/components', '<Name>/index.tsx — Layout, ui kit, dialogs, forms'],
+    [1, '📂', 'src/data', 'shared types, keyboard map'],
+    [1, '📂', 'src/pages', '<Page>/index.tsx — Billing, Purchases, Products…'],
+    [1, '📂', 'src/services', 'http.common, catalogue, print, labels, format'],
     [0, '📁', 'docs/readme', 'these animated pictures · node docs/readme/build.mjs'],
-    [0, '📁', 'ops', 'PostgreSQL-edition docker-compose + backup script'],
-    [0, '📁', 'scripts', 'smoke-test, rush-test, e2e-ui'],
+    [0, '📁', 'ops · scripts', 'PostgreSQL-edition compose + backup · smoke, rush, e2e'],
   ];
-  a.add(`<rect class="card" width="1200" height="360" rx="18"/>`);
+  const RH = 34, H = 30 + rows.length * RH + 14;
+  const a = new Art(1200, H, 'Repository layout: backend (config, controllers, middleware, models, routes, services, utils, validators, scripts), frontend (app, assets, components, data, pages, services), docs, ops, scripts');
+  const C = 14;
+  a.add(`<rect class="card" width="1200" height="${H}" rx="18"/>`);
   rows.forEach(([lvl, e, name, desc], i) => {
-    const y = 40 + i * 40, x = 32 + lvl * 40, t0 = 0.3 + i * 0.45;
+    const y = 40 + i * RH, x = 32 + lvl * 40, t0 = 0.3 + i * 0.32;
     if (lvl) {
       const draw = a.anim(`0%,${pct(((t0 - 0.2) / C) * 100)}{stroke-dashoffset:1}${pct(((t0 + 0.3) / C) * 100)},94%{stroke-dashoffset:0}100%{stroke-dashoffset:1}`, C, { base: 'stroke-dashoffset:0;' });
-      a.add(`<path class="${draw}" d="M44 ${y - 26}V${y - 6}H${x - 6}" pathLength="1" stroke-dasharray="1" fill="none" stroke="#94a3b8" stroke-width="1.5"/>`);
+      a.add(`<path class="${draw}" d="M44 ${y - RH + 8}V${y - 6}H${x - 6}" pathLength="1" stroke-dasharray="1" fill="none" stroke="#94a3b8" stroke-width="1.5"/>`);
     }
     a.add(`<g class="${a.reveal(t0, C, { from: 'translateX(-10px)' })}"><text x="${x}" y="${y}" class="e" style="font-size:17px">${e}</text>` +
-      `<text x="${x + 28}" y="${y}" class="m" fill="#3b82c4">${esc(name)}</text>` +
+      `<text x="${x + 28}" y="${y}" class="m" fill="#3b82c4"${lvl ? '' : ' style="font-weight:800"'}>${esc(name)}</text>` +
       `<text x="${470}" y="${y}" class="p">${esc(desc)}</text></g>`);
   });
   a.write('layout.svg');

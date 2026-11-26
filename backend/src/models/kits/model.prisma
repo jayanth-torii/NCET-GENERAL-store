@@ -1,0 +1,27 @@
+// Section kits (bundles of products sold together).
+
+model Kit {
+  id        Int        @id @default(0) @map("_id")
+  code      String     @unique
+  name      String
+  price     Float
+  isActive  Boolean    @default(true) @map("is_active")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+  items     KitItem[]
+  saleItems SaleItem[]
+
+  @@map("kit")
+}
+
+model KitItem {
+  id        Int     @id @default(0) @map("_id")
+  kitId     Int     @map("kit_id")
+  productId Int     @map("product_id")
+  qty       Float
+  kit       Kit     @relation(fields: [kitId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id])
+
+  @@unique([kitId, productId])
+  @@map("kit_item")
+}

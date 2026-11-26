@@ -1,0 +1,44 @@
+// NCET Store POS v2 data model — MongoDB (Atlas) edition.
+//
+// Collections and field names are the same as the PostgreSQL edition (backend/postgres-legacy), so data
+// copies across 1:1 (scripts/migrate-from-postgres.ts).
+//
+// What changed for MongoDB, and where the old database guarantee now lives:
+//   • Ids stay numeric (URLs such as /purchases/22 keep working). MongoDB has no auto-increment, so new
+//     ids come from an atomic sequence collection (`_seq`) — see src/config/prisma.service.ts.
+//   • Money and quantities are stored as numbers (Float). Every calculation still runs in Decimal
+//     (src/utils/money.ts) and is rounded to 2 dp (money) / 3 dp (qty) / 4 dp (unit cost) before saving.
+//   • Partial unique indexes (one active product per name, one live GRN per supplier invoice) are
+//     created by src/config/mongo-indexes.ts on `npm run migrate` and on every API start.
+//   • The stock ledger and audit log are append-only: the Prisma client refuses update/delete on them
+//     (the PostgreSQL edition used database triggers).
+//   • Row locks are replaced by MongoDB transactions with automatic retry on write conflicts.
+//
+// The schema is split by feature: this file holds the generator, the datasource and the shared
+// counters; every other model lives in models/<feature>/model.prisma (Prisma multi-file schema).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// Gapless document numbers. One document per series, e.g. "SALE:C2:26-27".
+// Incremented inside the document's transaction, so a failed save rolls the number back too.
+model DocCounter {
+  key   String @id @map("_id")
+  value Int
+
+  @@map("doc_counter")
+}
+
+// Next id per collection (MongoDB has no auto-increment). Managed by src/config/prisma.service.ts.
+model Sequence {
+  name  String @id @map("_id")
+  value Int
+
+  @@map("_seq")
+}

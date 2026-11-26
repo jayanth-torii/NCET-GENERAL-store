@@ -101,7 +101,7 @@ Replaces Link-Zee 1.0 and follows `NCET_Store_POS_Blueprint.pdf` — now running
 
 ```powershell
 npm install
-copy apps\api\.env.example apps\api\.env   # set DATABASE_URL (Atlas mongodb+srv://…/ncet_store), JWT_SECRET, ADMIN_INITIAL_PASSWORD
+copy backend\.env.example backend\.env     # set DATABASE_URL (Atlas mongodb+srv://…/ncet_store), JWT_SECRET, ADMIN_INITIAL_PASSWORD
 npm run migrate                             # collections, indexes, partial unique indexes, id sequences
 npm run build                               # build first: it also generates the database client
 npm run seed                                # admin user, counters C1 C2 C3 OF, units, categories, charge types
@@ -130,7 +130,7 @@ One desktop shortcut per counter, with the 80 mm printer as that PC's default:
 
 <br>
 
-**HTTPS on the store network** — create a local certificate (for example with `mkcert`), install its root on each counter PC, and set `HTTPS_CERT_FILE` / `HTTPS_KEY_FILE` in `apps/api/.env`.
+**HTTPS on the store network** — create a local certificate (for example with `mkcert`), install its root on each counter PC, and set `HTTPS_CERT_FILE` / `HTTPS_KEY_FILE` in `backend/.env`.
 
 **Store answers (blueprint § 25)** — UPI ID and payee name, GST registration and GSTIN, counters, charge types and the negative-stock rule are all settings under *Masters → Store settings*; no code changes.
 
@@ -150,14 +150,14 @@ One desktop shortcut per counter, with the 80 mm printer as that PC's default:
 
 | PostgreSQL edition | MongoDB edition | Where |
 |---|---|---|
-| `SERIAL` / auto-increment ids | numeric ids from an atomic `_seq` collection (URLs like `/purchases/22` keep working) | `src/prisma/prisma.service.ts` |
-| `NUMERIC(12,2)` money | Decimal maths everywhere, stored rounded to 4 dp | `src/common/money.ts` |
-| `SELECT … FOR UPDATE` row locks | per-item queue in the one API server + MongoDB transactions retried on write conflict | `src/common/keyed-lock.ts`, `withTx` |
-| triggers making ledger + audit append-only | the database client refuses update / delete on them | `prisma.service.ts` |
-| partial unique indexes | MongoDB partial indexes: active product name, barcode, GRN no, live supplier invoice | `src/prisma/mongo-indexes.ts` |
-| `INSERT … ON CONFLICT` bill counter | upsert + `$inc` inside the bill's transaction (still gapless) | `src/common/doc-number.ts` |
-| SQL aggregate reports | Prisma `groupBy` / MongoDB `$group` pipelines, figures computed in Decimal | `src/reports/reports.service.ts` |
-| `NULL` columns | every optional field written as `null`, so `field: null` filters match | `prisma.service.ts`, `mongo-indexes.ts` |
+| `SERIAL` / auto-increment ids | numeric ids from an atomic `_seq` collection (URLs like `/purchases/22` keep working) | `backend/src/config/prisma.service.ts` |
+| `NUMERIC(12,2)` money | Decimal maths everywhere, stored rounded to 4 dp | `backend/src/utils/money.ts` |
+| `SELECT … FOR UPDATE` row locks | per-item queue in the one API server + MongoDB transactions retried on write conflict | `backend/src/utils/keyed-lock.ts`, `withTx` |
+| triggers making ledger + audit append-only | the database client refuses update / delete on them | `config/prisma.service.ts` |
+| partial unique indexes | MongoDB partial indexes: active product name, barcode, GRN no, live supplier invoice | `backend/src/config/mongo-indexes.ts` |
+| `INSERT … ON CONFLICT` bill counter | upsert + `$inc` inside the bill's transaction (still gapless) | `backend/src/utils/doc-number.ts` |
+| SQL aggregate reports | Prisma `groupBy` / MongoDB `$group` pipelines, figures computed in Decimal | `backend/src/services/reports/service.ts` |
+| `NULL` columns | every optional field written as `null`, so `field: null` filters match | `config/prisma.service.ts`, `config/mongo-indexes.ts` |
 
 </details>
 
@@ -168,7 +168,7 @@ One desktop shortcut per counter, with the 80 mm printer as that PC's default:
 
 <img src="docs/readme/migrate.svg" alt="Rows flow from PostgreSQL into MongoDB Atlas in batches of 200; 4,633 rows, every count matched" width="100%">
 
-Set `POSTGRES_URL` in `apps/api/.env` to the old database, then:
+Set `POSTGRES_URL` in `backend/.env` to the old database, then:
 
 ```powershell
 npm run migrate                              # once, on the empty MongoDB database
@@ -176,7 +176,7 @@ npm run migrate:from-postgres -- --wipe      # copies every table, keeps ids, ch
 npm run check:stock                          # every product's balance must equal its ledger
 ```
 
-The copy retries dropped connections batch by batch (each batch is idempotent) and stops on any rejected document. The PostgreSQL schema and migrations are kept in `apps/api/prisma/postgres-legacy/`.
+The copy retries dropped connections batch by batch (each batch is idempotent) and stops on any rejected document. The PostgreSQL schema and migrations are kept in `backend/postgres-legacy/`.
 
 <img src="docs/readme/divider.svg" alt="" width="100%">
 
@@ -229,7 +229,7 @@ The copy retries dropped connections batch by batch (each batch is idempotent) a
 <a name="layout"></a>
 <img src="docs/readme/h-layout.svg" alt="11 · Layout — where things live" width="100%">
 
-<img src="docs/readme/layout.svg" alt="Repository tree: apps/api, apps/web, docs/readme, ops, scripts" width="100%">
+<img src="docs/readme/layout.svg" alt="Repository tree: backend (config, controllers, middleware, models, routes, services, utils, validators), frontend (app, assets, components, data, pages, services), docs, ops, scripts" width="100%">
 
 The pictures in this README are plain SVG made by `node docs/readme/build.mjs` (except `hero`, `stats`, `bill-flow` and `architecture`, which are hand-made). They respect dark mode and *reduce motion*.
 
