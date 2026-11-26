@@ -1,24 +1,24 @@
+import type { Sale, SaleItem, SalePayment, SalesReturn } from '../../models/sales/model';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { Response } from 'express';
 import { SessionUser } from '../../middleware/auth.decorators';
 import { D, Dec, r2n, r3n, sum } from '../../utils/money';
 import { SettingsService } from '../settings/service';
 import { fmtDate, fmtDateTime, fyRange, istDate, istMonthRange, istRange } from '../../utils/time';
-import { PrismaService } from '../../config/prisma.service';
+import { DbService, JsonValue, Loaded } from '../../config/db';
 import { StockService } from '../stock/service';
 import { reportToPdf } from '../../utils/render-pdf';
 import { reportToXlsx } from '../../utils/render-xlsx';
 import { num, Report, ReportColumn } from '../../models/reports/model';
 
 type Range = { start: Date; end: Date };
-type SaleRow = Prisma.SaleGetPayload<{ include: { counter: { select: { code: true } }; user: { select: { fullName: true } } } }>;
+type SaleRow = Loaded<Sale>;
 type SalesSet = {
   sales: SaleRow[];
-  items: Prisma.SaleItemGetPayload<{ include: { product: { select: { category: { select: { name: true } } } } } }>[];
-  payments: Prisma.SalePaymentGetPayload<object>[];
-  returns: Prisma.SalesReturnGetPayload<object>[];
-  saleOf: (id: bigint) => SaleRow;
+  items: Loaded<SaleItem>[];
+  payments: Loaded<SalePayment>[];
+  returns: Loaded<SalesReturn>[];
+  saleOf: (id: number | bigint) => SaleRow;
 };
 const n = (v: unknown) => num(v);
 /** Hour of the day in IST (UTC+5:30) for a stored timestamp. */
@@ -33,7 +33,7 @@ function eachDay(from: string, to: string): string[] {
 @Injectable()
 export class ReportsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly stock: StockService,
     private readonly settings: SettingsService,
   ) {}
@@ -79,19 +79,19 @@ export class ReportsService {
 
   private async loadSales(r: Range, userId?: number): Promise<SalesSet> {
     const uf = userId ? { userId } : {};
-    const sales = await this.prisma.sale.findMany({
+    const sales = await this.db.sale.findMany({
       where: { billedAt: { gte: r.start, lt: r.end }, ...uf },
       orderBy: { billedAt: 'asc' },
       include: { counter: { select: { code: true } }, user: { select: { fullName: true } } },
     });
     const ids = sales.map((s) => s.id);
     const [items, payments, returns] = await Promise.all([
-      ids.length ? this.prisma.saleItem.findMany({ where: { saleId: { in: ids } }, include: { product: { select: { category: { select: { name: true } } } } } }) : Promise.resolve([]),
-      ids.length ? this.prisma.salePayment.findMany({ where: { saleId: { in: ids } } }) : Promise.resolve([]),
-      this.prisma.salesReturn.findMany({ where: { createdAt: { gte: r.start, lt: r.end }, ...uf } }),
+      ids.length ? this.db.saleItem.findMany({ where: { saleId: { in: ids } }, include: { product: { select: { category: { select: { name: true } } } } } }) : Promise.resolve([]),
+      ids.length ? this.db.salePayment.findMany({ where: { saleId: { in: ids } } }) : Promise.resolve([]),
+      this.db.salesReturn.findMany({ where: { createdAt: { gte: r.start, lt: r.end }, ...uf } }),
     ]);
     const byId = new Map(sales.map((s) => [String(s.id), s]));
-    return { sales, items, payments, returns, saleOf: (id: bigint) => byId.get(String(id))! };
+    return { sales, items, payments, returns, saleOf: (id: number | bigint) => byId.get(String(id))! };
   }
 
   private async salesHeadline(r: Range, userId?: number) {
@@ -186,7 +186,7 @@ export class ReportsService {
     const exceptions = ownOnly
       ? []
       : (
-          await this.prisma.auditLog.findMany({
+          await this.db.auditLog.findMany({
             where: {
               createdAt: { gte: r.start, lt: r.end },
               action: { in: ['SALE_EDIT', 'SALE_CANCEL', 'SALES_RETURN', 'PRICE_OVERRIDE', 'HOLD_DISCARD', 'RECEIPT_REPRINT', 'STOCK_ADJUST', 'STOCK_ADJUST_APPROVE', 'PURCHASE_CANCEL', 'PURCHASE_RETURN', 'PRICE_CHANGE'] },
@@ -194,7 +194,7 @@ export class ReportsService {
             orderBy: { createdAt: 'asc' },
             include: { user: { select: { fullName: true } } },
           })
-        ).map((a) => ({ at: a.createdAt, who: a.user?.fullName ?? null, action: a.action, detail: (a.after ?? a.before) as Prisma.JsonValue, entity_id: a.entityId }));
+        ).map((a) => ({ at: a.createdAt, who: a.user?.fullName ?? null, action: a.action, detail: (a.after ?? a.before) as JsonValue, entity_id: a.entityId }));
     const describe = (action: string, d: Record<string, unknown>) => {
       const money = (v: unknown) => `₹${n(v).toFixed(2)}`;
       switch (action) {
@@ -404,7 +404,7 @@ export class ReportsService {
 
   async salesRegister(from: string, to: string, user: SessionUser, f: { counterId?: number; userId?: number }): Promise<Report> {
     const r = istRange(from, to);
-    const bills = await this.prisma.sale.findMany({
+    const bills = await this.db.sale.findMany({
       where: { billedAt: { gte: r.start, lt: r.end }, ...(f.counterId ? { counterId: f.counterId } : {}), ...(f.userId ? { userId: f.userId } : {}) },
       orderBy: { billedAt: 'asc' },
       include: { counter: true, user: { select: { fullName: true } }, payments: true, items: { orderBy: { lineNo: 'asc' } }, _count: { select: { returns: true } } },
@@ -462,8 +462,8 @@ export class ReportsService {
     const set = await this.salesSet(r);
     const kitLines = set.items.filter((i) => i.kitId !== null && set.saleOf(i.saleId)?.status === 'COMPLETED');
     const [kits, retLines] = await Promise.all([
-      this.prisma.kit.findMany({ where: { id: { in: [...new Set(kitLines.map((i) => i.kitId!))] } }, select: { id: true, code: true, name: true } }),
-      this.prisma.salesReturnItem.findMany({ where: { saleItemId: { in: kitLines.map((i) => i.id) } }, select: { saleItemId: true, qty: true } }),
+      this.db.kit.findMany({ where: { id: { in: [...new Set(kitLines.map((i) => i.kitId!))] } }, select: { id: true, code: true, name: true } }),
+      this.db.salesReturnItem.findMany({ where: { saleItemId: { in: kitLines.map((i) => i.id) } }, select: { saleItemId: true, qty: true } }),
     ]);
     const kitOf = new Map(kits.map((k) => [k.id, k]));
     const g = new Map<string, { code: string; name: string; section: string; bills: Set<string>; qty: Dec; amount: Dec; returned: Dec }>();
@@ -511,12 +511,12 @@ export class ReportsService {
 
   /** Printable class order sheet for one kit: what the kit contains, then one row per student to tick paid / issued. */
   async kitOrderSheet(kitId: number, section: string, students: number, user: SessionUser): Promise<Report> {
-    const kit = await this.prisma.kit.findUnique({ where: { id: kitId }, include: { items: { include: { product: { select: { code: true, name: true } } }, orderBy: { id: 'asc' } } } });
+    const kit = await this.db.kit.findUnique({ where: { id: kitId }, include: { items: { include: { product: { select: { code: true, name: true } } }, orderBy: { id: 'asc' } } } });
     if (!kit) throw new NotFoundException('Kit not found');
     const sec = section.trim() || '______________';
     return {
       title: `Order sheet · ${kit.name}`,
-      subtitle: `Section: ${sec} · Kit price Rs ${n(kit.price).toFixed(2)} · Kit code ${kit.code}`,
+      subtitle: `Section: ${sec} · Kit price ₹${n(kit.price).toFixed(2)} · Kit code ${kit.code}`,
       fileName: `order_sheet_${kit.code}_${section.trim().replace(/[^A-Za-z0-9]+/g, '_') || 'section'}`,
       ...this.meta(user),
       summary: [
@@ -534,7 +534,7 @@ export class ReportsService {
           title: 'Students',
           columns: [
             { key: 'sn', label: 'S.No', type: 'int' }, { key: 'roll', label: 'Roll no' }, { key: 'student', label: 'Student name' },
-            { key: 'paid', label: 'Paid (Rs)' }, { key: 'issued', label: 'Issued (tick)' }, { key: 'sign', label: 'Signature' },
+            { key: 'paid', label: 'Paid (₹)' }, { key: 'issued', label: 'Issued (tick)' }, { key: 'sign', label: 'Signature' },
           ],
           rows: Array.from({ length: students }, (_, i) => ({ sn: i + 1, roll: '', student: '', paid: '', issued: '', sign: '' })),
           note: 'Bill the kits at the counter as one line each with the section in the Customer box. The "Section kits" report then totals this section.',
@@ -547,7 +547,7 @@ export class ReportsService {
 
   async purchaseRegister(from: string, to: string, user: SessionUser, supplierId?: number): Promise<Report> {
     const r = istRange(from, to);
-    const purchases = await this.prisma.purchase.findMany({
+    const purchases = await this.db.purchase.findMany({
       where: { status: { in: ['POSTED', 'CANCELLED'] }, postedAt: { gte: r.start, lt: r.end }, ...(supplierId ? { supplierId } : {}) },
       orderBy: { postedAt: 'asc' },
       include: { supplier: true, charges: { include: { chargeType: true } }, _count: { select: { items: true } } },
@@ -570,7 +570,7 @@ export class ReportsService {
     const chargeDetail = purchases
       .filter((x) => x.status === 'POSTED')
       .flatMap((p) => p.charges.map((c) => ({ purchaseNo: p.purchaseNo, type: c.chargeType.name, paidTo: c.paidTo ?? '', ref: c.referenceNo ?? '', amount: n(c.amount) })));
-    const returns = await this.prisma.purchaseReturn.findMany({ where: { createdAt: { gte: r.start, lt: r.end }, ...(supplierId ? { supplierId } : {}) }, include: { supplier: true, purchase: true }, orderBy: { createdAt: 'asc' } });
+    const returns = await this.db.purchaseReturn.findMany({ where: { createdAt: { gte: r.start, lt: r.end }, ...(supplierId ? { supplierId } : {}) }, include: { supplier: true, purchase: true }, orderBy: { createdAt: 'asc' } });
     const s = (k: keyof (typeof posted)[number]) => posted.reduce((a, x) => a + (x[k] as number), 0);
     return {
       title: 'Purchase register',
@@ -621,7 +621,7 @@ export class ReportsService {
     const today = istDate();
     const limit = new Date(`${today}T00:00:00Z`);
     limit.setUTCDate(limit.getUTCDate() + days);
-    const batches = await this.prisma.purchaseItem.findMany({
+    const batches = await this.db.purchaseItem.findMany({
       where: { expiry: { not: null, lte: limit }, purchase: { is: { status: 'POSTED' } } },
       include: {
         purchase: { select: { purchaseNo: true, supplier: { select: { name: true } } } },
@@ -708,7 +708,7 @@ export class ReportsService {
   async gstInput(from: string, to: string, user: SessionUser): Promise<Report> {
     const settings = await this.settings.get();
     const storeState = settings.gstin?.slice(0, 2) ?? null;
-    const posted = await this.prisma.purchase.findMany({
+    const posted = await this.db.purchase.findMany({
       where: { status: 'POSTED', invoiceDate: { gte: new Date(`${from}T00:00:00Z`), lte: new Date(`${to}T00:00:00Z`) } },
       include: { supplier: { select: { name: true, gstin: true } }, items: { select: { gstRate: true, lineTotal: true, taxAmount: true } } },
     });
@@ -733,7 +733,7 @@ export class ReportsService {
       };
     });
     const r = istRange(from, to);
-    const prs = await this.prisma.purchaseReturn.findMany({
+    const prs = await this.db.purchaseReturn.findMany({
       where: { createdAt: { gte: r.start, lt: r.end } },
       include: { purchase: { select: { purchaseNo: true } }, supplier: { select: { name: true, gstin: true } }, items: { include: { purchaseItem: { select: { gstRate: true, lineTotal: true, taxAmount: true } } } } },
     });
@@ -812,7 +812,7 @@ export class ReportsService {
       const tax = n(x.tax);
       return { billNo: x.bill_no, date: fmtDate(x.billed_at), customer: x.customer ?? '', rate: x.rate, taxable: Math.round((total - tax) * 100) / 100, ...ReportsService.splitTax(tax, false), tax, total };
     });
-    const srs = await this.prisma.salesReturn.findMany({
+    const srs = await this.db.salesReturn.findMany({
       where: { createdAt: { gte: r.start, lt: r.end } },
       orderBy: { createdAt: 'asc' },
       include: { sale: { select: { billNo: true } }, items: { include: { saleItem: { select: { kitId: true, gstRate: true, lineTotal: true, taxAmount: true } } } } },

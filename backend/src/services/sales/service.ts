@@ -1,6 +1,9 @@
-import { withTx } from '../../config/prisma.service';
+import { DbError, Loaded, Tx, Where, withTx } from '../../config/db';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { MovementKind, PaymentMode, Prisma, Role, SaleStatus, StoreSetting } from '@prisma/client';
+import { StoreSetting } from '../../models/admin/model';
+import { Role } from '../../models/auth/model';
+import { PaymentMode, Sale, SaleStatus } from '../../models/sales/model';
+import { MovementKind } from '../../models/stock/model';
 import { z } from 'zod';
 import { SessionUser } from '../../middleware/auth.decorators';
 import { AuditService } from '../audit/service';
@@ -10,11 +13,10 @@ import { SettingsService } from '../settings/service';
 import { holdKeys } from '../../utils/keyed-lock';
 import { applyMovements, Movement, StockWarning } from '../../utils/stock-ledger';
 import { istDate, istRange, isSameIstDay } from '../../utils/time';
-import { PrismaService } from '../../config/prisma.service';
+import { DbService } from '../../config/db';
 import { CalcError, calcSale, CalcLineInput, settlePayments } from '../../utils/sale-calc';
 import { SaleInputT, ReturnInput } from '../../validators/sales/validator';
 
-type Tx = Prisma.TransactionClient;
 
 const MANAGERS: Role[] = [Role.ADMIN, Role.MANAGER];
 
@@ -36,7 +38,7 @@ interface PreparedLine {
 @Injectable()
 export class SalesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
   ) {}
@@ -47,8 +49,8 @@ export class SalesService {
     const productIds = [...new Set(items.filter((i) => i.productId).map((i) => i.productId!))];
     const kitIds = [...new Set(items.filter((i) => i.kitId).map((i) => i.kitId!))];
     const [products, kits] = await Promise.all([
-      this.prisma.product.findMany({ where: { id: { in: productIds } }, include: { unit: true } }),
-      this.prisma.kit.findMany({ where: { id: { in: kitIds } }, include: { items: { include: { product: { include: { unit: true } } } } } }),
+      this.db.product.findMany({ where: { id: { in: productIds } }, include: { unit: true } }),
+      this.db.kit.findMany({ where: { id: { in: kitIds } }, include: { items: { include: { product: { include: { unit: true } } } } } }),
     ]);
     const pMap = new Map(products.map((p) => [p.id, p]));
     const kMap = new Map(kits.map((k) => [k.id, k]));
@@ -159,10 +161,12 @@ export class SalesService {
       const key = `${p.mode}:${p.reference.toUpperCase()}`;
       await holdKeys([`ref:${key}`]);
       await tx.docCounter.upsert({ where: { key: `REF:${key}` }, create: { key: `REF:${key}`, value: 1 }, update: { value: { increment: 1 } } });
-      const clash = await tx.salePayment.findFirst({
-        where: { mode: p.mode, reference: { equals: p.reference, mode: 'insensitive' }, sale: { status: SaleStatus.COMPLETED, ...(exceptSaleId ? { id: { not: exceptSaleId } } : {}) } },
-        include: { sale: { select: { billNo: true } } },
+      // payments that used this reference (any case), then whether one belongs to another completed bill
+      const used = await tx.salePayment.findMany({
+        where: { mode: p.mode, reference: { equals: p.reference, mode: 'insensitive' } },
+        include: { sale: { select: { id: true, billNo: true, status: true } } },
       });
+      const clash = used.find((u) => u.sale && u.sale.status === SaleStatus.COMPLETED && (exceptSaleId === undefined || Number(u.sale.id) !== Number(exceptSaleId)));
       if (clash) throw new ConflictException(`${p.mode} transaction ${p.reference} was already used on bill ${clash.sale.billNo}`);
     }
   }
@@ -189,7 +193,7 @@ export class SalesService {
   /** Save a bill (FR-01, UR-5). Safe to retry: the same Idempotency-Key always returns the same bill. */
   async create(input: SaleInputT, user: SessionUser, idempotencyKey: string) {
     if (!user.counterId || !user.counterCode) throw new BadRequestException('Log in at a counter to make bills');
-    const existing = await this.prisma.sale.findUnique({ where: { idempotencyKey } });
+    const existing = await this.db.sale.findUnique({ where: { idempotencyKey } });
     if (existing) return this.replay(existing.id, user);
 
     const settings = await this.settings.get();
@@ -198,13 +202,13 @@ export class SalesService {
     const priceOverride = this.overrideCheck(lines, input.remarks);
 
     if (input.heldBillId) {
-      const held = await this.prisma.heldBill.findUnique({ where: { id: input.heldBillId } });
+      const held = await this.db.heldBill.findUnique({ where: { id: input.heldBillId } });
       if (!held || held.counterId !== user.counterId) throw new BadRequestException('That held bill belongs to another counter or was already recalled');
     }
 
     let warnings: StockWarning[] = [];
     try {
-      const sale = await withTx(this.prisma, 
+      const sale = await withTx(this.db, 
         async (tx) => {
           await this.assertReferencesUnused(tx, settlement.applied);
           const billNo = await nextBillNo(tx, user.counterCode!);
@@ -251,16 +255,16 @@ export class SalesService {
       };
     } catch (e) {
       // A retry raced the first attempt: return the bill that won.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' && String(e.meta?.target).includes('idempotency')) {
-        const won = await this.prisma.sale.findUnique({ where: { idempotencyKey } });
+      if (e instanceof DbError && e.code === 'P2002' && String(e.meta?.target).includes('idempotency')) {
+        const won = await this.db.sale.findUnique({ where: { idempotencyKey } });
         if (won) return this.replay(won.id, user);
       }
       throw e;
     }
   }
 
-  private async replay(id: bigint, user: SessionUser) {
-    const sale = await this.prisma.sale.findUniqueOrThrow({ where: { id } });
+  private async replay(id: number, user: SessionUser) {
+    const sale = await this.db.sale.findUniqueOrThrow({ where: { id } });
     if (sale.userId !== user.id) throw new ConflictException('This bill key was already used by another user');
     return { id: sale.id, billNo: sale.billNo, grandTotal: sale.grandTotal, changeDue: sale.changeDue, receiptUrl: `/api/v1/sales/${sale.id}/receipt?format=html`, warnings: [], replayed: true };
   }
@@ -284,7 +288,7 @@ export class SalesService {
     return sale;
   }
 
-  private priorLines(sale: Prisma.SaleGetPayload<{ include: { items: { include: { components: true } } } }>) {
+  private priorLines(sale: Loaded<Sale>) {
     return sale.items.map((i) => ({
       productId: i.productId,
       qty: D(i.qty),
@@ -300,7 +304,7 @@ export class SalesService {
     const { totals, settlement } = this.compute(lines, input.payments, settings);
     const priceOverride = this.overrideCheck(lines, input.remarks);
     let warnings: StockWarning[] = [];
-    await withTx(this.prisma, 
+    await withTx(this.db, 
       async (tx) => {
         const before = await this.lockForChange(tx, id, 'edited');
         await this.assertReferencesUnused(tx, settlement.applied, id);
@@ -340,7 +344,7 @@ export class SalesService {
 
   /** Manager cancel, same day only, with a reason. Stock is put back with reversing movements; nothing is deleted. */
   async cancel(id: bigint, reason: string, user: SessionUser, ip: string) {
-    await withTx(this.prisma, async (tx) => {
+    await withTx(this.db, async (tx) => {
       const sale = await this.lockForChange(tx, id, 'cancelled');
       await applyMovements(tx, this.movementsFor(this.priorLines(sale), 1, MovementKind.CANCEL, 'SALE', id, `Bill cancelled: ${reason}`), user.id, { blockNegative: false });
       await tx.sale.update({ where: { id }, data: { status: SaleStatus.CANCELLED, cancelReason: reason, cancelledById: user.id, cancelledAt: new Date() } });
@@ -352,7 +356,7 @@ export class SalesService {
   /** Sales return against the original bill (FR-13). */
   async createReturn(saleId: bigint, input: z.infer<typeof ReturnInput>, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    return withTx(this.prisma, async (tx) => {
+    return withTx(this.db, async (tx) => {
       await this.claimSale(tx, saleId);
       const sale = await tx.sale.findUnique({
         where: { id: saleId },
@@ -418,9 +422,9 @@ export class SalesService {
     if (!user.counterId) throw new BadRequestException('Log in at a counter to hold bills');
     const json = JSON.stringify(payload ?? {});
     if (json.length > 200_000) throw new BadRequestException('The held bill is too large');
-    const count = await this.prisma.heldBill.count({ where: { counterId: user.counterId } });
+    const count = await this.db.heldBill.count({ where: { counterId: user.counterId } });
     if (count >= 30) throw new ConflictException('This counter already has 30 held bills. Recall or clear some first.');
-    const held = await this.prisma.heldBill.create({
+    const held = await this.db.heldBill.create({
       data: { counterId: user.counterId, userId: user.id, label: (label ?? '').trim().slice(0, 60) || `Held ${new Date().toISOString().slice(11, 16)}`, payload: JSON.parse(json) },
     });
     await this.audit.log({ userId: user.id, action: 'HOLD_CREATE', entity: 'held_bill', entityId: held.id, ip, after: this.holdSummary(held.payload) });
@@ -439,15 +443,15 @@ export class SalesService {
 
   listHeld(user: SessionUser) {
     if (!user.counterId) return [];
-    return this.prisma.heldBill.findMany({ where: { counterId: user.counterId }, orderBy: { createdAt: 'asc' }, include: { user: { select: { fullName: true } } } });
+    return this.db.heldBill.findMany({ where: { counterId: user.counterId }, orderBy: { createdAt: 'asc' }, include: { user: { select: { fullName: true } } } });
   }
 
   /** A cashier may discard only their own holds; a manager may discard any on the counter. */
   async deleteHeld(id: number, user: SessionUser, ip: string) {
-    const held = await this.prisma.heldBill.findFirst({ where: { id, counterId: user.counterId ?? -1 } });
+    const held = await this.db.heldBill.findFirst({ where: { id, counterId: user.counterId ?? -1 } });
     if (!held) throw new NotFoundException('Held bill not found on this counter');
     if (held.userId !== user.id && !MANAGERS.includes(user.role)) throw new ForbiddenException('Only the cashier who held this bill, or a manager, can discard it');
-    await this.prisma.heldBill.delete({ where: { id } });
+    await this.db.heldBill.delete({ where: { id } });
     await this.audit.log({ userId: user.id, action: 'HOLD_DISCARD', entity: 'held_bill', entityId: id, ip, before: { ...this.holdSummary(held.payload), heldBy: held.userId, label: held.label } });
     return { ok: true };
   }
@@ -458,7 +462,7 @@ export class SalesService {
    */
   async receiptFor(id: bigint, user: SessionUser, ip: string) {
     await this.detail(id, user); // applies the cashier scope
-    const sale = await withTx(this.prisma, async (tx) => {
+    const sale = await withTx(this.db, async (tx) => {
       const s = await tx.sale.update({
         where: { id },
         data: { printCount: { increment: 1 } },
@@ -473,7 +477,7 @@ export class SalesService {
   // ---------- Register and detail (FR-03) ----------
 
   /** Cashiers only see their own bills from today. */
-  private scope(user: SessionUser): Prisma.SaleWhereInput {
+  private scope(user: SessionUser): Where {
     if (user.role !== Role.CASHIER) return {};
     const { start, end } = istRange(istDate(), istDate());
     return { userId: user.id, billedAt: { gte: start, lt: end } };
@@ -481,7 +485,7 @@ export class SalesService {
 
   async list(q: { from: string; to: string; counterId?: number; userId?: number; status?: SaleStatus; q?: string; page: number; pageSize: number }, user: SessionUser) {
     const { start, end } = istRange(q.from, q.to);
-    const where: Prisma.SaleWhereInput = {
+    const where: Where = {
       AND: [
         { billedAt: { gte: start, lt: end } },
         q.counterId ? { counterId: q.counterId } : {},
@@ -492,15 +496,15 @@ export class SalesService {
       ],
     };
     const [rows, total, agg] = await Promise.all([
-      this.prisma.sale.findMany({
+      this.db.sale.findMany({
         where,
         orderBy: { billedAt: 'desc' },
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
         include: { counter: { select: { code: true } }, user: { select: { fullName: true } }, payments: true, _count: { select: { items: true, returns: true } } },
       }),
-      this.prisma.sale.count({ where }),
-      this.prisma.sale.aggregate({ where: { AND: [where, { status: SaleStatus.COMPLETED }] }, _sum: { grandTotal: true }, _count: true }),
+      this.db.sale.count({ where }),
+      this.db.sale.aggregate({ where: { AND: [where, { status: SaleStatus.COMPLETED }] }, _sum: { grandTotal: true }, _count: true }),
     ]);
     return {
       rows: rows.map((s) => ({
@@ -518,7 +522,7 @@ export class SalesService {
   }
 
   async detail(id: bigint, user: SessionUser) {
-    const sale = await this.prisma.sale.findFirst({
+    const sale = await this.db.sale.findFirst({
       where: { AND: [{ id }, this.scope(user)] },
       include: {
         counter: true,
@@ -545,7 +549,7 @@ export class SalesService {
 
   async lastBillOfCounter(user: SessionUser) {
     if (!user.counterId) throw new BadRequestException('Not logged in at a counter');
-    const s = await this.prisma.sale.findFirst({ where: { counterId: user.counterId, ...this.scope(user) }, orderBy: { billedAt: 'desc' }, select: { id: true, billNo: true } });
+    const s = await this.db.sale.findFirst({ where: { counterId: user.counterId, ...this.scope(user) }, orderBy: { billedAt: 'desc' }, select: { id: true, billNo: true } });
     if (!s) throw new NotFoundException('No bills on this counter yet');
     return s;
   }

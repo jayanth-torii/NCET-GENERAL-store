@@ -7,16 +7,17 @@ import { join } from 'path';
 config({ path: join(__dirname, '..', '.env') });
 
 import { hash, Algorithm } from '@node-rs/argon2';
-import { ChargeAllocation, PrismaClient, Role } from '@prisma/client';
-import { PrismaService } from '../src/config/prisma.service';
+import { Role } from '../src/models/auth/model';
+import { ChargeAllocation } from '../src/models/masters/model';
+import { DbService, disconnectDb } from '../src/config/db';
 import { ensureMongoIndexes } from '../src/config/mongo-indexes';
 
 // The API's client: numeric ids from the _seq sequence, Decimal → number, uniqueness keys (MongoDB edition).
-const prisma: PrismaClient = new PrismaService();
+const prisma = new DbService();
 
 async function main() {
   // Partial unique indexes + id sequences (idempotent; also run by `npm run migrate` and on API start).
-  await ensureMongoIndexes(prisma);
+  await ensureMongoIndexes();
   await prisma.storeSetting.upsert({ where: { id: 1 }, update: {}, create: { id: 1 } });
 
   const pw = process.env.ADMIN_INITIAL_PASSWORD;
@@ -78,4 +79,4 @@ main()
     console.error(e);
     process.exit(1);
   })
-  .finally(() => prisma.$disconnect());
+  .finally(() => disconnectDb());

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# PostgreSQL edition only. The MongoDB edition backs up with `npm run backup` (nightly in the API; see backend/src/services/backup/service.ts).
 # Nightly backup of the Store POS database.
 # - Daily dump:   /backups/daily/storepos_YYYY-MM-DD.dump   (30 kept)
 # - Monthly dump: /backups/monthly/storepos_YYYY-MM.dump    (12 kept, taken on the 1st)

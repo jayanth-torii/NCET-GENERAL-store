@@ -13,17 +13,22 @@ import { config } from 'dotenv';
 import { join } from 'path';
 config({ path: join(__dirname, '..', '.env') });
 
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Double, Int32, Long } from 'bson';
+import mongoose, { Model } from 'mongoose';
 import { Client } from 'pg';
+import { connectDb, disconnectDb, invoiceKey, nameKey } from '../src/config/db';
 import { ensureMongoIndexes } from '../src/config/mongo-indexes';
-import { invoiceKey, nameKey } from '../src/config/prisma.service';
 
 const wipe = process.argv.includes('--wipe');
 const pgUrl = process.env.POSTGRES_URL;
 if (!pgUrl) throw new Error('Set POSTGRES_URL in backend/.env to the old PostgreSQL database');
 
-const mongo = new PrismaClient();
-const models = Prisma.dmmf.datamodel.models.filter((m) => m.name !== 'Sequence');
+/** Every Mongoose model except the id sequences (rebuilt from the data afterwards). */
+const models = () =>
+  mongoose
+    .modelNames()
+    .filter((n) => n !== 'Sequence')
+    .map((n) => mongoose.model(n) as Model<unknown>);
 
 /** PostgreSQL column that held a model's id (MongoDB stores it as _id). */
 const legacyIdColumn = (model: string) => (model === 'ProductStock' ? 'product_id' : model === 'DocCounter' ? 'key' : 'id');
@@ -41,31 +46,35 @@ async function retry<T>(fn: () => Promise<T>, tries = 6): Promise<T> {
   }
 }
 
-/** Extended JSON for one value of a MongoDB field. */
-function toEjson(type: string, v: unknown): unknown {
+/** One PostgreSQL value as the BSON type its Mongoose path declares. */
+function toBson(instance: string, v: unknown): unknown {
   if (v === null || v === undefined) return null;
-  switch (type) {
-    case 'Float':
-    case 'Int':
-      return Number(v);
+  switch (instance) {
+    case 'Double':
+      return new Double(Number(v));
+    case 'Int32':
+      return new Int32(Number(v));
     case 'BigInt':
-      return { $numberLong: String(v) };
-    case 'DateTime':
-      return { $date: (v instanceof Date ? v : new Date(String(v))).toISOString() };
+      return Long.fromString(String(v));
+    case 'Date':
+      return v instanceof Date ? v : new Date(String(v));
     case 'Boolean':
       return Boolean(v);
     default:
-      return v; // String, enums (text), Json (already parsed by pg)
+      return v; // String, enums (text), Mixed / Json (already parsed by pg)
   }
 }
 
 async function main() {
+  await connectDb();
+  const db = mongoose.connection.db!;
   const pg = new Client({ connectionString: pgUrl });
   await pg.connect();
   const report: { collection: string; postgres: number; mongo: number }[] = [];
   try {
-    for (const m of models) {
-      const collection = m.dbName ?? m.name;
+    for (const m of models()) {
+      const collection = m.collection.collectionName;
+      const mongo = db.collection(collection);
       const exists = await pg.query('SELECT to_regclass($1) AS t', [collection]);
       if (!exists.rows[0].t) {
         console.log(`  - ${collection}: no such table in PostgreSQL, skipped`);
@@ -74,40 +83,35 @@ async function main() {
       const { rows } = await pg.query(`SELECT * FROM "${collection}"`);
       const docs = rows.map((row: Record<string, unknown>) => {
         const doc: Record<string, unknown> = {};
-        for (const f of m.fields) {
-          if (f.kind === 'object') continue;
-          const field = f.dbName ?? f.name;
-          if (f.isId) {
-            doc._id = toEjson(f.type, row[legacyIdColumn(m.name)]);
-            continue;
-          }
-          if (field in row) doc[field] = toEjson(f.type, row[field]);
-        }
+        m.schema.eachPath((field, type) => {
+          if (field === '_id') doc._id = toBson(type.instance, row[legacyIdColumn(m.modelName)]);
+          else if (field in row) doc[field] = toBson(type.instance, row[field]);
+        });
         // Fields that exist only in the MongoDB edition.
-        if (m.name === 'Product') doc.name_key = nameKey(String(row.name));
-        if (m.name === 'Purchase') doc.invoice_key = invoiceKey(String(row.supplier_invoice_no));
-        if (m.name === 'Sale') doc.row_version = 0;
+        if (m.modelName === 'Product') doc.name_key = nameKey(String(row.name));
+        if (m.modelName === 'Purchase') doc.invoice_key = invoiceKey(String(row.supplier_invoice_no));
+        if (m.modelName === 'Sale') doc.row_version = 0;
         return doc;
       });
-      if (wipe) await retry(() => mongo.$runCommandRaw({ delete: collection, deletes: [{ q: {}, limit: 0 }] }));
+      if (wipe) await retry(() => mongo.deleteMany({}));
       for (let i = 0; i < docs.length; i += 200) {
         const batch = docs.slice(i, i + 200);
         // Idempotent batch: a dropped connection may have stored part of it, so clear the batch's ids first.
         await retry(async () => {
-          await mongo.$runCommandRaw({ delete: collection, deletes: [{ q: { _id: { $in: batch.map((d) => d._id) } }, limit: 0 }] } as Prisma.InputJsonObject);
-          const res = (await mongo.$runCommandRaw({ insert: collection, documents: batch as Prisma.InputJsonValue[], ordered: true })) as { n: number; writeErrors?: { errmsg: string }[] };
-          // MongoDB reports rejected documents in the reply instead of failing the command: stop on any.
-          if (res.writeErrors?.length || res.n !== batch.length) throw new Error(`${collection}: ${res.writeErrors?.[0]?.errmsg ?? `${res.n} of ${batch.length} stored`}`);
+          await mongo.deleteMany({ _id: { $in: batch.map((d) => d._id) as never[] } });
+          // ordered insertMany fails on the first rejected document, so nothing is skipped silently
+          const res = await mongo.insertMany(batch as never[], { ordered: true });
+          if (res.insertedCount !== batch.length) throw new Error(`${collection}: ${res.insertedCount} of ${batch.length} stored`);
         });
       }
-      const count = (await retry(() => mongo.$runCommandRaw({ count: collection }))) as { n: number };
-      report.push({ collection, postgres: rows.length, mongo: count.n });
+      const count = await retry(() => mongo.countDocuments());
+      report.push({ collection, postgres: rows.length, mongo: count });
       console.log(`  ✓ ${collection.padEnd(22)} ${String(rows.length).padStart(6)} rows`);
     }
   } finally {
     await pg.end();
   }
-  await ensureMongoIndexes(mongo, (s) => console.log(`  ✓ ${s}`));
+  await ensureMongoIndexes((s) => console.log(`  ✓ ${s}`));
   const bad = report.filter((r) => r.postgres !== r.mongo);
   console.table(report);
   if (bad.length) throw new Error(`Row counts differ for: ${bad.map((b) => b.collection).join(', ')}`);
@@ -119,4 +123,4 @@ main()
     console.error(e);
     process.exitCode = 1;
   })
-  .finally(() => mongo.$disconnect());
+  .finally(() => disconnectDb());

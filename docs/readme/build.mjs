@@ -400,10 +400,10 @@ function tests() {
   const a = new Art(1200, 320, 'Test results on MongoDB Atlas: unit 15/15, smoke 155/155, browser 47/47, rush 12/13, stock check 0 differences');
   const C = 10;
   const rows = [
-    ['npm test', 'bill maths, rounding, ₹1 gate, IST dates', 1, '15 / 15', '#16a34a'],
+    ['npm test', 'bill maths, rounding, ₹1 gate, backups', 1, '18 / 18', '#16a34a'],
     ['npm run smoke', 'every API flow, role and report format', 1, '155 / 155', '#16a34a'],
     ['node scripts/e2e-ui.mjs', 'a real browser, keyboard-only billing', 1, '47 / 47', '#16a34a'],
-    ['npm run rush', '4 counters, same items, double presses', 12 / 13, '12 / 13 · p95 2.8 s', '#d97706'],
+    ['npm run rush', '4 counters, same items, double presses', 12 / 13, '12 / 13 · p95 3.2 s', '#d97706'],
     ['npm run check:stock', 'cached stock = ledger, every item', 1, '0 differences', '#16a34a'],
   ];
   rows.forEach(([cmd, desc, f, res, col], i) => {
@@ -423,11 +423,11 @@ function tests() {
 
 // ───────────────────────────── trade-offs ─────────────────────────────
 function tradeoffs() {
-  const a = new Art(1200, 250, 'Trade-offs: billing needs the internet, about 2.8 s bill saves at rush, backups must be planned');
+  const a = new Art(1200, 250, 'Trade-offs: billing needs the internet, about 3 s bill saves at rush, Atlas connection drops are retried');
   const cards = [
     ['#d97706', 'Billing needs the internet', ['Atlas is in the cloud: a campus outage', 'stops the counters. A replica set on the', 'store server fixes it — same code.']],
-    ['#0F4C81', '≈ 2.8 s save at rush (p95)', ['15–20 round trips to Atlas per bill,', '31–218 ms each. The 300 ms target', 'assumed a local database.']],
-    ['#e11d48', 'Backups are on you', ['ops/backup.sh is PostgreSQL-only.', 'Free M0 clusters have no backups —', 'schedule a mongodump of ncet_store.']],
+    ['#0F4C81', '≈ 3 s save at rush (p95)', ['About 12 round trips to Atlas per bill;', '~0.9 s in normal traffic. The 300 ms', 'target assumed a local database.']],
+    ['#e11d48', 'Atlas connection drops', ['The store network refuses some TLS', 'handshakes; reads and transactions are', 'retried, slow requests are logged.']],
   ];
   cards.forEach(([col, t, lines], i) => {
     const x = i * 412;
@@ -460,11 +460,11 @@ function tradeoffs() {
 // ───────────────────────────── layout tree ─────────────────────────────
 function layout() {
   const rows = [
-    [0, '📁', 'backend', 'NestJS + Prisma (MongoDB) · API and built web app on :3000'],
+    [0, '📁', 'backend', 'NestJS + Mongoose (MongoDB Atlas) · API and web app on :3000'],
     [1, '📂', 'src/config', 'database client, indexes + id sequences, auth module'],
     [1, '📂', 'src/controllers', '<feature>/controller.ts — sales, purchases, stock, reports…'],
     [1, '📂', 'src/middleware', 'auth guard, role decorators, error filter'],
-    [1, '📂', 'src/models', 'schema.prisma + <feature>/model.prisma (split schema)'],
+    [1, '📂', 'src/models', '<feature>/model.ts — mongoose.Schema, indexes, relations'],
     [1, '📂', 'src/routes', '<feature>/route.ts + globalRoutes.ts (order matters)'],
     [1, '📂', 'src/services', '<feature>/service.ts — bills, GRNs, stock, reports'],
     [1, '📂', 'src/utils', 'money, time, stock ledger, locks, PDF + Excel'],
@@ -544,7 +544,7 @@ function footer() {
   a.add(w(96, 14, 0.25), w(110, 10, 0.45), w(124, 8, 1),
     `<g transform="translate(600 40)"><g class="${a.bob(2.4, 3)}"><text text-anchor="middle" class="e" style="font-size:26px">🏪</text></g></g>`,
     `<text x="600" y="76" text-anchor="middle" class="t" style="font-size:16px">Built for the General Store at Nagarjuna College of Engineering &amp; Technology</text>`,
-    `<text x="600" y="142" text-anchor="middle" style="font:600 12px ${F}" fill="#fff" fill-opacity=".85">NestJS · Prisma · MongoDB Atlas · React 19 · Vite · Tailwind</text>`);
+    `<text x="600" y="142" text-anchor="middle" style="font:600 12px ${F}" fill="#fff" fill-opacity=".85">NestJS · Mongoose · MongoDB Atlas · React 19 · Vite · Tailwind</text>`);
   a.write('footer.svg');
 }
 

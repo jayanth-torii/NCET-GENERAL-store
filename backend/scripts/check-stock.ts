@@ -9,9 +9,9 @@ config({ path: join(__dirname, '..', '.env') });
 
 import { Logger } from '@nestjs/common';
 import { StockCheckService } from '../src/services/stockCheck/service';
-import { PrismaService } from '../src/config/prisma.service';
+import { DbService, disconnectDb } from '../src/config/db';
 
-const prisma = new PrismaService();
+const prisma = new DbService();
 new StockCheckService(prisma)
   .run()
   .then((r) => {
@@ -25,4 +25,4 @@ new StockCheckService(prisma)
     Logger.error(e, 'check:stock');
     process.exitCode = 1;
   })
-  .finally(() => prisma.$disconnect());
+  .finally(() => disconnectDb());

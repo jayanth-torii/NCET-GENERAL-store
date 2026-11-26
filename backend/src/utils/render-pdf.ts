@@ -1,23 +1,23 @@
+import { join } from 'path';
 import type { Content, TDocumentDefinitions, TableCell } from 'pdfmake/interfaces';
 import { formatCell, Report } from '../models/reports/model';
 
-// pdfmake on the server, with the PDF standard fonts, so no font files or headless browser are needed.
+// pdfmake on the server with DM Sans embedded (the font the web app uses), so PDFs can print ₹.
+// The static Regular/Bold files in assets/fonts were made from the variable DM Sans with fontTools'
+// instancer (OFL licence alongside). No headless browser is needed.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PdfPrinter = require('pdfmake');
+const FONT_DIR = join(__dirname, '..', 'assets', 'fonts');
+const regular = join(FONT_DIR, 'DMSans-Regular.ttf');
+const bold = join(FONT_DIR, 'DMSans-Bold.ttf');
 const printer = new PdfPrinter({
-  Helvetica: { normal: 'Helvetica', bold: 'Helvetica-Bold', italics: 'Helvetica-Oblique', bolditalics: 'Helvetica-BoldOblique' },
-  Courier: { normal: 'Courier', bold: 'Courier-Bold', italics: 'Courier-Oblique', bolditalics: 'Courier-BoldOblique' },
+  DMSans: { normal: regular, bold, italics: regular, bolditalics: bold },
 });
+export const PDF_FONT = 'DMSans';
 
-/** The standard PDF fonts only cover Latin-1, so map the few symbols we use and drop anything else. */
+/** Keep what DM Sans can draw (Latin, Latin Extended-A, common punctuation, ₹); anything else becomes '?'. */
 export function pdfText(s: unknown): string {
-  return String(s ?? '')
-    .replace(/₹/g, 'Rs.')
-    .replace(/[−–—]/g, '-')
-    .replace(/×/g, 'x')
-    .replace(/[‘’]/g, "'")
-    .replace(/[“”]/g, '"')
-    .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, '?');
+  return String(s ?? '').replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\u017F\u2010-\u2027\u2030-\u203A\u20B9\u2122\u2190-\u2193\u2212]/g, '?');
 }
 
 export function renderPdf(doc: TDocumentDefinitions): Promise<Buffer> {
@@ -87,7 +87,7 @@ export function reportToPdf(r: Report, storeName: string): Promise<Buffer> {
     pageSize: 'A4',
     pageOrientation: r.landscape ? 'landscape' : 'portrait',
     pageMargins: [28, 28, 28, 36],
-    defaultStyle: { font: 'Helvetica', fontSize: 8.5 },
+    defaultStyle: { font: PDF_FONT, fontSize: 8.5 },
     footer: (page: number, pages: number) => ({ text: `${pdfText(r.title)}  -  page ${page} of ${pages}`, alignment: 'center', fontSize: 7, color: '#888888', margin: [0, 10, 0, 0] }),
     styles: {
       store: { fontSize: 9, bold: true, color: '#F6872A' },

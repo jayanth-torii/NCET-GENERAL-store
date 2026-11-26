@@ -1,13 +1,15 @@
-import { withTx } from '../../config/prisma.service';
+import { DbError, DbService, Tx, Where, withTx } from '../../config/db';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { MovementKind, Prisma, Role } from '@prisma/client';
+import { Role } from '../../models/auth/model';
+import { MovementKind } from '../../models/stock/model';
 import ExcelJS from 'exceljs';
 import { SessionUser } from '../../middleware/auth.decorators';
 import { AuditService } from '../audit/service';
 import { D, num } from '../../utils/money';
 import { SettingsService } from '../settings/service';
 import { applyMovements } from '../../utils/stock-ledger';
-import { PrismaService } from '../../config/prisma.service';
+import type { Category, Unit } from '../../models/masters/model';
+import type { Product, ProductStock } from '../../models/products/model';
 import { ProductInput, ProductInputT } from '../../validators/products/validator';
 
 export function normalizeName(name: string): string {
@@ -22,14 +24,14 @@ const PRICE_FIELDS = ['salePrice', 'mrp'] as const;
 @Injectable()
 export class ProductsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
   ) {}
 
   private async assertNameFree(name: string, exceptId?: number) {
     // name_key = lower-case, single-spaced name (kept by the Prisma client); unique among active products.
-    const hit = await this.prisma.product.findFirst({
+    const hit = await this.db.product.findFirst({
       where: { isActive: true, nameKey: nameKey(name), ...(exceptId ? { id: { not: exceptId } } : {}) },
       select: { id: true, code: true, name: true },
     });
@@ -40,9 +42,9 @@ export class ProductsService {
 
   private async assertRefs(p: { categoryId: number; unitId: number; packUnitId?: number | null }) {
     const [cat, unit, pack] = await Promise.all([
-      this.prisma.category.findUnique({ where: { id: p.categoryId } }),
-      this.prisma.unit.findUnique({ where: { id: p.unitId } }),
-      p.packUnitId ? this.prisma.unit.findUnique({ where: { id: p.packUnitId } }) : Promise.resolve(true),
+      this.db.category.findUnique({ where: { id: p.categoryId } }),
+      this.db.unit.findUnique({ where: { id: p.unitId } }),
+      p.packUnitId ? this.db.unit.findUnique({ where: { id: p.packUnitId } }) : Promise.resolve(true),
     ]);
     if (!cat) throw new BadRequestException('Category does not exist');
     if (!unit) throw new BadRequestException('Unit does not exist');
@@ -50,7 +52,7 @@ export class ProductsService {
     return unit;
   }
 
-  private async nextCode(tx: Prisma.TransactionClient): Promise<string> {
+  private async nextCode(tx: Tx): Promise<string> {
     // Highest all-digit code + 1 (legacy item codes are numbers; codes like "PHY-REC" are skipped).
     const codes = await tx.product.findMany({ select: { code: true } });
     let max = 0;
@@ -72,7 +74,7 @@ export class ProductsService {
     const settings = await this.settings.get();
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        return await withTx(this.prisma, async (tx) => {
+        return await withTx(this.db, async (tx) => {
           const code = input.code?.trim() || (await this.nextCode(tx));
           const product = await tx.product.create({
             data: {
@@ -106,7 +108,7 @@ export class ProductsService {
         });
       } catch (e) {
         // Two people auto-numbering at the same moment: retry with the next free code.
-        if (!input.code && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' && String(e.meta?.target).includes('code')) continue;
+        if (!input.code && e instanceof DbError && e.code === 'P2002' && String(e.meta?.target).includes('code')) continue;
         throw e;
       }
     }
@@ -114,7 +116,7 @@ export class ProductsService {
   }
 
   async update(id: number, input: ProductInputT, user: SessionUser) {
-    const before = await this.prisma.product.findUnique({ where: { id } });
+    const before = await this.db.product.findUnique({ where: { id } });
     if (!before) throw new NotFoundException('Product not found');
     const name = normalizeName(input.name);
     if (before.isActive) await this.assertNameFree(name, id);
@@ -134,7 +136,7 @@ export class ProductsService {
     }
 
     // Pack size changes are safe: past purchase lines keep their own pack-size snapshot.
-    return withTx(this.prisma, async (tx) => {
+    return withTx(this.db, async (tx) => {
       const after = await tx.product.update({
         where: { id },
         data: {
@@ -165,16 +167,16 @@ export class ProductsService {
   }
 
   async setActive(id: number, active: boolean, user: SessionUser) {
-    const p = await this.prisma.product.findUnique({ where: { id } });
+    const p = await this.db.product.findUnique({ where: { id } });
     if (!p) throw new NotFoundException('Product not found');
     if (active && !p.isActive) await this.assertNameFree(p.name, id);
-    const after = await this.prisma.product.update({ where: { id }, data: { isActive: active } });
+    const after = await this.db.product.update({ where: { id }, data: { isActive: active } });
     await this.audit.log({ userId: user.id, action: active ? 'PRODUCT_ACTIVATE' : 'PRODUCT_DEACTIVATE', entity: 'product', entityId: id });
     return after;
   }
 
   async list(q: { q?: string; categoryId?: number; active?: 'true' | 'false' | 'all'; page: number; pageSize: number; lowStock?: boolean }, showCost: boolean) {
-    const where: Prisma.ProductWhereInput = {};
+    const where: Where = {};
     if (q.active !== 'all') where.isActive = q.active !== 'false';
     if (q.categoryId) where.categoryId = q.categoryId;
     if (q.q) {
@@ -187,27 +189,27 @@ export class ProductsService {
       ];
     }
     const [rows, total] = await Promise.all([
-      this.prisma.product.findMany({
+      this.db.product.findMany({
         where,
         include: { category: true, unit: true, packUnit: true, stock: true },
         orderBy: { name: 'asc' },
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
       }),
-      this.prisma.product.count({ where }),
+      this.db.product.count({ where }),
     ]);
     return { rows: rows.map((p) => shapeProduct(p, showCost)), total, page: q.page, pageSize: q.pageSize };
   }
 
   async get(id: number, showCost: boolean) {
-    const p = await this.prisma.product.findUnique({ where: { id }, include: { category: true, unit: true, packUnit: true, stock: true } });
+    const p = await this.db.product.findUnique({ where: { id }, include: { category: true, unit: true, packUnit: true, stock: true } });
     if (!p) throw new NotFoundException('Product not found');
     return shapeProduct(p, showCost);
   }
 
   /** Compact catalogue cached by the billing screen for instant search (NFR-01). Purchase cost only goes to roles that buy. */
   async catalogue(since: Date | undefined, showCost: boolean) {
-    const rows = await this.prisma.product.findMany({
+    const rows = await this.db.product.findMany({
       where: since ? { updatedAt: { gt: since } } : { isActive: true },
       select: {
         id: true, code: true, barcode: true, name: true, salePrice: true, mrp: true, gstRate: true, isActive: true, categoryId: true, packSize: true, lastCost: true,
@@ -230,23 +232,22 @@ export class ProductsService {
   async quickKeys() {
     // MongoDB aggregation: completed bills of the last 30 days → their lines → quantity per product.
     const since = new Date(Date.now() - 30 * 86400000);
-    const agg = (await this.prisma.sale.aggregateRaw({
-      pipeline: [
-        { $match: { status: 'COMPLETED', billed_at: { $gte: { $date: since.toISOString() } } } },
+    const agg = await this.db.aggregate<{ _id: number; qty: number }>('sale', [
+        { $match: { status: 'COMPLETED', billed_at: { $gte: since } } },
         { $lookup: { from: 'sale_item', localField: '_id', foreignField: 'sale_id', as: 'it' } },
         { $unwind: '$it' },
         { $match: { 'it.product_id': { $ne: null } } },
         { $group: { _id: '$it.product_id', qty: { $sum: '$it.qty' } } },
-        { $sort: { qty: -1 } },
+        // equal quantities are ordered by product id, so the grid is the same on every counter
+        { $sort: { qty: -1, _id: 1 } },
         { $limit: 80 },
-      ],
-    })) as unknown as { _id: number; qty: number }[];
+    ]);
     const active = new Set(
-      (await this.prisma.product.findMany({ where: { id: { in: agg.map((r) => Number(r._id)) }, isActive: true }, select: { id: true } })).map((p) => p.id),
+      (await this.db.product.findMany({ where: { id: { in: agg.map((r) => Number(r._id)) }, isActive: true }, select: { id: true } })).map((p) => p.id),
     );
     let ids = agg.map((r) => Number(r._id)).filter((id) => active.has(id)).slice(0, 24);
     if (ids.length < 24) {
-      const extra = await this.prisma.product.findMany({
+      const extra = await this.db.product.findMany({
         where: { isActive: true, id: { notIn: ids } },
         orderBy: { name: 'asc' },
         take: 24 - ids.length,
@@ -262,7 +263,7 @@ export class ProductsService {
   static readonly SHEET_COLUMNS = ['Code', 'Barcode', 'Name', 'Category', 'Unit', 'Pack Unit', 'Pack Size', 'HSN', 'GST %', 'MRP', 'Sale Price', 'Reorder Level', 'Rack'];
 
   async exportXlsx(): Promise<Buffer> {
-    const products = await this.prisma.product.findMany({ include: { category: true, unit: true, packUnit: true }, orderBy: { name: 'asc' }, where: { isActive: true } });
+    const products = await this.db.product.findMany({ include: { category: true, unit: true, packUnit: true }, orderBy: { name: 'asc' }, where: { isActive: true } });
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Products');
     ws.addRow(ProductsService.SHEET_COLUMNS).font = { bold: true };
@@ -293,9 +294,9 @@ export class ProductsService {
       if (idx(col) < 0) throw new BadRequestException(`Column "${col}" is missing. Use the exported product sheet as a template.`);
     }
     const [categories, units, existing] = await Promise.all([
-      this.prisma.category.findMany(),
-      this.prisma.unit.findMany(),
-      this.prisma.product.findMany({ select: { id: true, code: true, name: true, salePrice: true, mrp: true, isActive: true } }),
+      this.db.category.findMany(),
+      this.db.unit.findMany(),
+      this.db.product.findMany({ select: { id: true, code: true, name: true, salePrice: true, mrp: true, isActive: true } }),
     ]);
     const catByName = new Map(categories.map((c) => [c.name.toLowerCase(), c]));
     const unitByCode = new Map(units.map((u) => [u.code.toLowerCase(), u]));
@@ -359,7 +360,7 @@ export class ProductsService {
     if (errors.length) throw new BadRequestException({ message: `${errors.length} row(s) have problems. Nothing was imported.`, errors: errors.slice(0, 200) });
     if (rows.length === 0) throw new BadRequestException('The sheet has no product rows');
 
-    const result = await withTx(this.prisma, 
+    const result = await withTx(this.db, 
       async (tx) => {
         let created = 0;
         let updated = 0;
@@ -406,7 +407,8 @@ export class ProductsService {
   }
 }
 
-type ProductWithRefs = Prisma.ProductGetPayload<{ include: { category: true; unit: true; packUnit: true; stock: true } }>;
+/** A product read with include: { category, unit, packUnit, stock }. */
+type ProductWithRefs = Product & { category: Category; unit: Unit; packUnit: Unit | null; stock: ProductStock | null };
 export function shapeProduct(p: ProductWithRefs, showCost = true) {
   return {
     id: p.id,

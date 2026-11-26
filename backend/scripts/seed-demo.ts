@@ -9,11 +9,10 @@ import { config } from 'dotenv';
 import { join } from 'path';
 config({ path: join(__dirname, '..', '.env') });
 
-import { PrismaClient } from '@prisma/client';
-import { PrismaService } from '../src/config/prisma.service';
+import { DbService, disconnectDb } from '../src/config/db';
 
 // The API's client: numeric ids from the _seq sequence, Decimal → number, uniqueness keys (MongoDB edition).
-const prisma: PrismaClient = new PrismaService();
+const prisma = new DbService();
 
 // [code or '', name, category, sale price, reorder level, GST %]
 const PRODUCTS: [string, string, string, number, number, number][] = [
@@ -136,4 +135,4 @@ main()
     console.error(e);
     process.exit(1);
   })
-  .finally(() => prisma.$disconnect());
+  .finally(() => disconnectDb());

@@ -7,5 +7,5 @@
 <path d="M0 124 C 200 116 400 132 600 124 S 1000 116 1200 124 V150 H0Z" fill="url(#w1)" opacity="1"><animate attributeName="d" values="M0 124 C 200 116 400 132 600 124 S 1000 116 1200 124 V150 H0Z;M0 124 C 200 132 400 116 600 124 S 1000 132 1200 124 V150 H0Z;M0 124 C 200 116 400 132 600 124 S 1000 116 1200 124 V150 H0Z" dur="13s" repeatCount="indefinite"/></path>
 <g transform="translate(600 40)"><g class="a0"><text text-anchor="middle" class="e" style="font-size:26px">🏪</text></g></g>
 <text x="600" y="76" text-anchor="middle" class="t" style="font-size:16px">Built for the General Store at Nagarjuna College of Engineering &amp; Technology</text>
-<text x="600" y="142" text-anchor="middle" style="font:600 12px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#fff" fill-opacity=".85">NestJS · Prisma · MongoDB Atlas · React 19 · Vite · Tailwind</text>
+<text x="600" y="142" text-anchor="middle" style="font:600 12px 'Segoe UI',Inter,'Helvetica Neue',Arial,sans-serif" fill="#fff" fill-opacity=".85">NestJS · Mongoose · MongoDB Atlas · React 19 · Vite · Tailwind</text>
 </svg>

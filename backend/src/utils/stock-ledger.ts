@@ -1,9 +1,9 @@
+import { Tx } from '../config/db';
 import { ConflictException } from '@nestjs/common';
-import { MovementKind, Prisma } from '@prisma/client';
+import { MovementKind } from '../models/stock/model';
 import { holdKeys } from './keyed-lock';
 import { D, Dec, num } from './money';
 
-type Tx = Prisma.TransactionClient;
 
 export interface Movement {
   productId: number;
@@ -66,10 +66,10 @@ export async function applyMovements(
   // One round trip for every balance: atomic $inc inside the transaction (never read-modify-write);
   // upsert creates a missing balance row. If another server instance wrote the same balance, MongoDB
   // reports a write conflict and withTx re-runs the whole transaction.
-  await tx.$runCommandRaw({
-    update: 'product_stock',
-    updates: changed.map(([productId, delta]) => ({ q: { _id: productId }, u: { $inc: { on_hand: num(delta) } }, upsert: true })),
-  });
+  await tx.collection('product_stock').bulkWrite(
+    changed.map(([productId, delta]) => ({ updateOne: { filter: { _id: productId as never }, update: { $inc: { on_hand: num(delta) } }, upsert: true } })),
+    { ...tx.opts, ordered: true },
+  );
   const balances = await tx.productStock.findMany({ where: { productId: { in: changed.map(([p]) => p) } }, select: { productId: true, onHand: true } });
   // Balances are compared at 3 dp (repeated float increments can carry ~1e-12 noise).
   const negatives = balances.filter((b) => deltas.get(b.productId)!.lt(0) && D(b.onHand).toDecimalPlaces(3).lt(0)).map((b) => b.productId);

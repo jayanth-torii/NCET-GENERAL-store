@@ -1,6 +1,8 @@
-import { withTx } from '../../config/prisma.service';
+import { JsonValue, withTx } from '../../config/db';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { AdjustmentStatus, MovementKind, Prisma, Role } from '@prisma/client';
+import Decimal from 'decimal.js';
+import { Role } from '../../models/auth/model';
+import { AdjustmentStatus, MovementKind } from '../../models/stock/model';
 import ExcelJS from 'exceljs';
 import { SessionUser } from '../../middleware/auth.decorators';
 import { AuditService } from '../audit/service';
@@ -8,7 +10,7 @@ import { D, num, r3n } from '../../utils/money';
 import { SettingsService } from '../settings/service';
 import { applyMovements } from '../../utils/stock-ledger';
 import { istRange } from '../../utils/time';
-import { PrismaService } from '../../config/prisma.service';
+import { DbService } from '../../config/db';
 
 export type StockRow = {
   productId: number;
@@ -45,7 +47,7 @@ function cellValue(v: ExcelJS.CellValue): string | number | null {
 @Injectable()
 export class StockService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
   ) {}
@@ -61,13 +63,12 @@ export class StockService {
     const term = q.q?.trim().toLowerCase() || null;
     // One MongoDB $group over the ledger up to the end date, splitting each product's movements into the
     // legacy Stock Summary columns (same buckets as the PostgreSQL FILTER clauses).
-    const at = (d: Date) => ({ $date: d.toISOString() });
+    const at = (d: Date) => d;
     const inRange = { $gte: ['$created_at', at(start)] };
-    const bucket = (cond: Prisma.InputJsonValue, sign = 1): Prisma.InputJsonObject => ({ $sum: { $cond: [cond, sign === 1 ? '$qty' : { $multiply: ['$qty', -1] }, 0] } });
+    const bucket = (cond: JsonValue, sign = 1): JsonValue => ({ $sum: { $cond: [cond, sign === 1 ? '$qty' : { $multiply: ['$qty', -1] }, 0] } });
     const kindIs = (k: string) => ({ $eq: ['$kind', k] });
     const cancelOf = (ref: string) => ({ $and: [kindIs('CANCEL'), { $eq: ['$ref_type', ref] }] });
-    const mv = (await this.prisma.stockMovement.aggregateRaw({
-      pipeline: [
+    const mv = await this.db.aggregate<{ _id: number; before: number; opening_in: number; purchased: number; sold: number; sales_ret: number; pur_ret: number; adjust: number }>('stock_movement', [
         { $match: { created_at: { $lt: at(end) } } },
         {
           $group: {
@@ -81,10 +82,9 @@ export class StockService {
             adjust: bucket({ $and: [inRange, kindIs('ADJUSTMENT')] }),
           },
         },
-      ],
-    })) as unknown as { _id: number; before: number; opening_in: number; purchased: number; sold: number; sales_ret: number; pur_ret: number; adjust: number }[];
+    ]);
     const byProduct = new Map(mv.map((m) => [Number(m._id), m]));
-    const products = await this.prisma.product.findMany({
+    const products = await this.db.product.findMany({
       where: q.categoryId ? { categoryId: q.categoryId } : {},
       include: { category: { select: { name: true } }, unit: { select: { code: true } }, stock: { select: { onHand: true } } },
     });
@@ -137,7 +137,7 @@ export class StockService {
 
   /** Items at or below their reorder level, and items below zero (R8). */
   async lowAndNegative() {
-    const products = await this.prisma.product.findMany({
+    const products = await this.db.product.findMany({
       where: { isActive: true },
       include: { category: { select: { name: true } }, unit: { select: { code: true } }, stock: { select: { onHand: true } } },
     });
@@ -156,8 +156,8 @@ export class StockService {
   async deadStock(days: number) {
     const since = new Date(Date.now() - days * 86400000);
     const [products, lastSales] = await Promise.all([
-      this.prisma.product.findMany({ where: { isActive: true, stock: { is: { onHand: { gt: 0 } } } }, include: { category: { select: { name: true } }, stock: { select: { onHand: true } } } }),
-      this.prisma.stockMovement.groupBy({ by: ['productId'], where: { kind: 'SALE' }, _max: { createdAt: true } }),
+      this.db.product.findMany({ where: { isActive: true, stock: { is: { onHand: { gt: 0 } } } }, include: { category: { select: { name: true } }, stock: { select: { onHand: true } } } }),
+      this.db.stockMovement.groupBy({ by: ['productId'], where: { kind: 'SALE' }, _max: { createdAt: true } }),
     ]);
     const lastSaleOf = new Map(lastSales.map((l) => [l.productId, l._max.createdAt]));
     const rows = products
@@ -173,11 +173,11 @@ export class StockService {
 
   /** Item movement ledger with running balance (drill-down). */
   async movements(productId: number, from: string, to: string) {
-    const product = await this.prisma.product.findUnique({ where: { id: productId }, include: { unit: true, stock: true } });
+    const product = await this.db.product.findUnique({ where: { id: productId }, include: { unit: true, stock: true } });
     if (!product) throw new NotFoundException('Product not found');
     const { start, end } = istRange(from, to);
-    const openingAgg = await this.prisma.stockMovement.aggregate({ where: { productId, createdAt: { lt: start } }, _sum: { qty: true } });
-    const moves = await this.prisma.stockMovement.findMany({
+    const openingAgg = await this.db.stockMovement.aggregate({ where: { productId, createdAt: { lt: start } }, _sum: { qty: true } });
+    const moves = await this.db.stockMovement.findMany({
       where: { productId, createdAt: { gte: start, lt: end } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       include: { createdBy: { select: { fullName: true } } },
@@ -185,10 +185,10 @@ export class StockService {
     // Document numbers for the ledger lines, looked up in one query per document type.
     const idsOf = (t: string) => [...new Set(moves.filter((m) => m.refType === t).map((m) => m.refId))];
     const [sales, purchases, sReturns, pReturns] = await Promise.all([
-      this.prisma.sale.findMany({ where: { id: { in: idsOf('SALE') } }, select: { id: true, billNo: true } }),
-      this.prisma.purchase.findMany({ where: { id: { in: idsOf('PURCHASE').map(Number) } }, select: { id: true, purchaseNo: true } }),
-      this.prisma.salesReturn.findMany({ where: { id: { in: idsOf('SALES_RETURN').map(Number) } }, select: { id: true, returnNo: true } }),
-      this.prisma.purchaseReturn.findMany({ where: { id: { in: idsOf('PURCHASE_RETURN').map(Number) } }, select: { id: true, returnNo: true } }),
+      this.db.sale.findMany({ where: { id: { in: idsOf('SALE') } }, select: { id: true, billNo: true } }),
+      this.db.purchase.findMany({ where: { id: { in: idsOf('PURCHASE').map(Number) } }, select: { id: true, purchaseNo: true } }),
+      this.db.salesReturn.findMany({ where: { id: { in: idsOf('SALES_RETURN').map(Number) } }, select: { id: true, returnNo: true } }),
+      this.db.purchaseReturn.findMany({ where: { id: { in: idsOf('PURCHASE_RETURN').map(Number) } }, select: { id: true, returnNo: true } }),
     ]);
     const doc = new Map<string, string>([
       ...sales.map((s) => [`SALE:${s.id}`, s.billNo] as [string, string]),
@@ -218,13 +218,13 @@ export class StockService {
 
   /** Manager/admin adjustments apply at once; a store keeper's adjustment waits for manager approval. */
   async createAdjustment(input: { productId: number; qtyChange?: number; countedQty?: number; reason: string }, user: SessionUser, ip: string) {
-    const product = await this.prisma.product.findUnique({ where: { id: input.productId }, include: { unit: true, stock: true } });
+    const product = await this.db.product.findUnique({ where: { id: input.productId }, include: { unit: true, stock: true } });
     if (!product) throw new NotFoundException('Product not found');
     if (input.countedQty !== undefined && !product.unit.allowDecimal && !Number.isInteger(input.countedQty)) throw new BadRequestException(`${product.name} is counted in whole ${product.unit.code}`);
     if (input.qtyChange !== undefined && !product.unit.allowDecimal && !Number.isInteger(input.qtyChange)) throw new BadRequestException(`${product.name} is counted in whole ${product.unit.code}`);
     const direct = MANAGERS.includes(user.role);
     const settings = await this.settings.get();
-    return withTx(this.prisma, async (tx) => {
+    return withTx(this.db, async (tx) => {
       // The difference from a shelf count is worked out on the balance read inside this transaction. If a
       // sale changes it before commit, MongoDB reports a write conflict and withTx re-runs the whole step,
       // so a sale in between cannot skew it (PostgreSQL did this with SELECT … FOR UPDATE).
@@ -254,7 +254,7 @@ export class StockService {
 
   async decideAdjustment(id: number, approve: boolean, note: string | null, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    return withTx(this.prisma, async (tx) => {
+    return withTx(this.db, async (tx) => {
       // Two managers deciding at once both update this document; MongoDB lets one commit and the other is
       // re-run by withTx, which then sees it is no longer PENDING.
       const adj = await tx.stockAdjustment.findUnique({ where: { id }, include: { product: true } });
@@ -275,7 +275,7 @@ export class StockService {
   }
 
   listAdjustments(status?: AdjustmentStatus) {
-    return this.prisma.stockAdjustment.findMany({
+    return this.db.stockAdjustment.findMany({
       where: status ? { status } : {},
       orderBy: { createdAt: 'desc' },
       take: 300,
@@ -305,10 +305,10 @@ export class StockService {
     const qi = header.indexOf('counted qty');
     const costI = header.indexOf('cost');
     if (ci < 0 || qi < 0) throw new BadRequestException('The sheet needs columns "Code" and "Counted Qty" (and optionally "Cost")');
-    const products = await this.prisma.product.findMany({ include: { unit: true, stock: true } });
+    const products = await this.db.product.findMany({ include: { unit: true, stock: true } });
     const byCode = new Map(products.map((p) => [p.code, p]));
     const errors: string[] = [];
-    const rows: { p: (typeof products)[number]; counted: Prisma.Decimal; cost: Prisma.Decimal | null }[] = [];
+    const rows: { p: (typeof products)[number]; counted: Decimal; cost: Decimal | null }[] = [];
     const seen = new Set<string>();
     ws.eachRow((r, n) => {
       if (n === 1) return;
@@ -322,7 +322,7 @@ export class StockService {
       const q = Number(qRaw);
       if (!Number.isFinite(q) || q < 0) return void errors.push(`Row ${n}: counted quantity must be zero or more`);
       if (!p.unit.allowDecimal && !Number.isInteger(q)) return void errors.push(`Row ${n}: ${p.name} is counted in whole ${p.unit.code}`);
-      let cost: Prisma.Decimal | null = null;
+      let cost: Decimal | null = null;
       if (costI >= 0) {
         const c = cellValue(r.getCell(costI + 1).value);
         if (c !== null && c !== undefined && c !== '') {
@@ -334,7 +334,7 @@ export class StockService {
     });
     if (errors.length) throw new BadRequestException({ message: `${errors.length} row(s) have problems. Nothing was loaded.`, errors: errors.slice(0, 200) });
     if (rows.length === 0) throw new BadRequestException('The sheet has no rows');
-    return withTx(this.prisma, 
+    return withTx(this.db, 
       async (tx) => {
         let changed = 0;
         const changes: { code: string; name: string; before: number; after: number }[] = [];

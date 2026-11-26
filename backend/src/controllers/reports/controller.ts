@@ -1,5 +1,5 @@
 import { BadRequestException, Controller, ForbiddenException, Get, Query, Res } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Role } from '../../models/auth/model';
 import { Response } from 'express';
 import { z } from 'zod';
 import { CurrentUser, R, Roles, SessionUser } from '../../middleware/auth.decorators';

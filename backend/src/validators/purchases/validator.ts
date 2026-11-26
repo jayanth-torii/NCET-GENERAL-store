@@ -1,4 +1,4 @@
-import { EntryUnit, PurchaseStatus } from '@prisma/client';
+import { EntryUnit, PurchaseStatus } from '../../models/purchases/model';
 import { z } from 'zod';
 import { zDate, zGst, zMoney, zOptText, zQty, zRate4, zReason } from '../validate';
 import { istDate } from '../../utils/time';

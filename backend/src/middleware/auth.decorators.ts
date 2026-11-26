@@ -1,5 +1,5 @@
 import { createParamDecorator, ExecutionContext, SetMetadata } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Role } from '../models/auth/model';
 
 export const IS_PUBLIC = 'isPublic';
 export const ROLES = 'roles';

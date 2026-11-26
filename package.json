@@ -21,7 +21,12 @@
     "smoke": "node scripts/smoke-test.mjs",
     "rush": "node scripts/rush-test.mjs",
     "migrate:from-postgres": "npm run migrate:from-postgres -w backend --",
-    "check:stock": "npm run check:stock -w backend"
+    "check:stock": "npm run check:stock -w backend",
+    "backup": "npm run backup -w backend",
+    "backup:test": "npm run backup:test -w backend --",
+    "backup:restore": "npm run backup:restore -w backend --",
+    "soak": "node scripts/soak-test.mjs",
+    "perf:stock": "npm run perf:stock -w backend"
   },
   "devDependencies": {
     "playwright-core": "^1.55.0"

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApiError, del, get, patch, post } from '../../services/http.common';
 import { MANAGE, useAuth } from '../../app/auth';
@@ -397,7 +397,10 @@ export function Billing() {
 
   // ---------- keyboard map ----------
   const anyModal = holdOpen || recallOpen || clearOpen || qrOpen;
-  useEffect(() => {
+  // A layout effect swaps in the handler with the current state during the same commit. With a plain effect
+  // the previous handler (which still saw the closed dialog as open) stayed attached until after paint, so
+  // an F key pressed right after closing a dialog (F6 hold, then F7 recall) could be ignored.
+  useLayoutEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (anyModal) return;
       // F2…F10, or Alt+2…Alt+0 for laptops whose top row sends volume/brightness (see lib/keys.ts).

@@ -1,5 +1,5 @@
+import { DbError } from '../config/db';
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { Response } from 'express';
 
 /**
@@ -22,7 +22,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       return;
     }
 
-    if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+    if (exception instanceof DbError) {
       if (exception.code === 'P2002') {
         const target = (exception.meta?.target as string[] | string | undefined) ?? '';
         res.status(HttpStatus.CONFLICT).json({ statusCode: 409, message: uniqueMessage(String(target)) });
@@ -32,24 +32,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
         res.status(HttpStatus.NOT_FOUND).json({ statusCode: 404, message: 'Record not found' });
         return;
       }
-      if (exception.code === 'P2003') {
-        res.status(HttpStatus.CONFLICT).json({ statusCode: 409, message: 'This record is in use by other records and cannot be removed' });
-        return;
-      }
       if (exception.code === 'P2034') {
         res.status(HttpStatus.CONFLICT).json({ statusCode: 409, message: 'Another counter changed the same data. Please try again.' });
         return;
-      }
-      if (exception.code === 'P2010') {
-        const msg = String(exception.meta?.message ?? exception.message);
-        if (msg.includes('23505')) {
-          res.status(HttpStatus.CONFLICT).json({ statusCode: 409, message: uniqueMessage(msg) });
-          return;
-        }
-        if (msg.includes('23514') || msg.includes('22003')) {
-          res.status(HttpStatus.BAD_REQUEST).json({ statusCode: 400, message: 'A value is outside the allowed range' });
-          return;
-        }
       }
     }
 

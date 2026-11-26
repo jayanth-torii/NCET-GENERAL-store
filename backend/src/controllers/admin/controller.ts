@@ -1,6 +1,6 @@
-import { withTx } from '../../config/prisma.service';
+import { Where, withTx } from '../../config/db';
 import { BadRequestException, Body, Controller, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post, Put, Query } from '@nestjs/common';
-import { Prisma, Role } from '@prisma/client';
+import { Role } from '../../models/auth/model';
 import { z } from 'zod';
 import { ClientIp, CurrentUser, R, Roles, SessionUser } from '../../middleware/auth.decorators';
 import { AuthService, checkPasswordStrength, hashPassword } from '../../services/auth/service';
@@ -8,16 +8,16 @@ import { AuditService } from '../../services/audit/service';
 import { SettingsService } from '../../services/settings/service';
 import { istDate, istRange } from '../../utils/time';
 import { parse, zDate } from '../../validators/validate';
-import { PrismaService } from '../../config/prisma.service';
+import { DbService } from '../../config/db';
 import { StockCheckService } from '../../services/stockCheck/service';
 import { UserCreate, UserUpdate, SettingsBody } from '../../validators/admin/validator';
 
-const userSelect = { id: true, username: true, fullName: true, role: true, isActive: true, mustChangePassword: true, createdAt: true } satisfies Prisma.AppUserSelect;
+const userSelect = { id: true, username: true, fullName: true, role: true, isActive: true, mustChangePassword: true, createdAt: true };
 
 @Controller()
 export class AdminController {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
     private readonly stockCheck: StockCheckService,
@@ -28,7 +28,7 @@ export class AdminController {
   @Roles(...R.MANAGE)
   @Get('users')
   users() {
-    return this.prisma.appUser.findMany({ select: userSelect, orderBy: [{ isActive: 'desc' }, { fullName: 'asc' }] });
+    return this.db.appUser.findMany({ select: userSelect, orderBy: [{ isActive: 'desc' }, { fullName: 'asc' }] });
   }
 
   @Roles(...R.ADMIN)
@@ -36,7 +36,7 @@ export class AdminController {
   async createUser(@Body() body: unknown, @CurrentUser() me: SessionUser, @ClientIp() ip: string) {
     const b = parse(UserCreate, body);
     checkPasswordStrength(b.password);
-    const u = await this.prisma.appUser.create({
+    const u = await this.db.appUser.create({
       data: { username: b.username, fullName: b.fullName, role: b.role, passwordHash: await hashPassword(b.password), mustChangePassword: true },
       select: userSelect,
     });
@@ -46,7 +46,7 @@ export class AdminController {
 
   private async assertAdminRemains(changingId: number, nextRole: Role, nextActive: boolean) {
     if (nextRole === Role.ADMIN && nextActive) return;
-    const others = await this.prisma.appUser.count({ where: { role: Role.ADMIN, isActive: true, id: { not: changingId } } });
+    const others = await this.db.appUser.count({ where: { role: Role.ADMIN, isActive: true, id: { not: changingId } } });
     if (others === 0) throw new BadRequestException('There must always be at least one active admin');
   }
 
@@ -54,12 +54,12 @@ export class AdminController {
   @Patch('users/:id')
   async updateUser(@Param('id', ParseIntPipe) id: number, @Body() body: unknown, @CurrentUser() me: SessionUser, @ClientIp() ip: string) {
     const b = parse(UserUpdate, body);
-    const before = await this.prisma.appUser.findUnique({ where: { id }, select: userSelect });
+    const before = await this.db.appUser.findUnique({ where: { id }, select: userSelect });
     if (!before) throw new NotFoundException('User not found');
     if (id === me.id && (!b.isActive || b.role !== me.role)) throw new BadRequestException('You cannot switch off or change the role of your own account');
     await this.assertAdminRemains(id, b.role, b.isActive);
     const roleOrActiveChanged = before.role !== b.role || before.isActive !== b.isActive;
-    const u = await withTx(this.prisma, async (tx) => {
+    const u = await withTx(this.db, async (tx) => {
       const updated = await tx.appUser.update({
         where: { id },
         data: { ...b, ...(roleOrActiveChanged ? { tokenVersion: { increment: 1 } } : {}) },
@@ -80,7 +80,7 @@ export class AdminController {
     const b = parse(z.object({ password: z.string().min(1).max(128) }), body);
     checkPasswordStrength(b.password);
     const hashed = await hashPassword(b.password);
-    await withTx(this.prisma, async (tx) => {
+    await withTx(this.db, async (tx) => {
       await tx.appUser.update({ where: { id }, data: { passwordHash: hashed, mustChangePassword: true, tokenVersion: { increment: 1 } } });
       await this.auth.revokeAll(id, 'PASSWORD_RESET', tx);
     });
@@ -99,7 +99,7 @@ export class AdminController {
   async putSettings(@Body() body: unknown, @CurrentUser() me: SessionUser, @ClientIp() ip: string) {
     const b = parse(SettingsBody, body);
     const before = await this.settings.get();
-    const after = await this.prisma.storeSetting.update({ where: { id: 1 }, data: b });
+    const after = await this.db.storeSetting.update({ where: { id: 1 }, data: b });
     this.settings.invalidate();
     await this.audit.log({ userId: me.id, action: 'SETTINGS_UPDATE', entity: 'settings', entityId: 1, before, after, ip });
     return after;
@@ -122,7 +122,7 @@ export class AdminController {
       q,
     );
     const r = istRange(p.from, p.to);
-    const where: Prisma.AuditLogWhereInput = {
+    const where: Where = {
       createdAt: { gte: r.start, lt: r.end },
       ...(p.action ? { action: p.action } : {}),
       ...(p.userId ? { userId: p.userId } : {}),
@@ -130,8 +130,8 @@ export class AdminController {
       ...(p.entityId ? { entityId: p.entityId } : {}),
     };
     const [rows, total] = await Promise.all([
-      this.prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (p.page - 1) * 200, take: 200, include: { user: { select: { fullName: true, username: true } } } }),
-      this.prisma.auditLog.count({ where }),
+      this.db.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (p.page - 1) * 200, take: 200, include: { user: { select: { fullName: true, username: true } } } }),
+      this.db.auditLog.count({ where }),
     ]);
     return { rows, total, page: p.page, pageSize: 200 };
   }
@@ -140,14 +140,14 @@ export class AdminController {
   @Roles(...R.MANAGE)
   @Get('alerts')
   alerts() {
-    return this.prisma.systemAlert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: 'desc' } });
+    return this.db.systemAlert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: 'desc' } });
   }
 
   @Roles(...R.ADMIN)
   @Post('alerts/:id/resolve')
   @HttpCode(200)
   async resolve(@Param('id', ParseIntPipe) id: number, @CurrentUser() me: SessionUser) {
-    const a = await this.prisma.systemAlert.update({ where: { id }, data: { resolvedAt: new Date() } });
+    const a = await this.db.systemAlert.update({ where: { id }, data: { resolvedAt: new Date() } });
     await this.audit.log({ userId: me.id, action: 'ALERT_RESOLVE', entity: 'alert', entityId: id });
     return a;
   }

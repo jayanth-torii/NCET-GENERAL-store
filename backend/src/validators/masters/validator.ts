@@ -1,4 +1,4 @@
-import { ChargeAllocation } from '@prisma/client';
+import { ChargeAllocation } from '../../models/masters/model';
 import { z } from 'zod';
 import { zOptText } from '../validate';
 

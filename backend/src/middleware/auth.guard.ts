@@ -1,8 +1,8 @@
 import { CanActivate, ExecutionContext, ForbiddenException, HttpException, HttpStatus, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
-import { Role } from '@prisma/client';
-import { PrismaService } from '../config/prisma.service';
+import { Role } from '../models/auth/model';
+import { DbService } from '../config/db';
 import { ALLOW_LOCKED, ALLOW_PASSWORD_CHANGE_PENDING, IS_PUBLIC, ROLES, SessionUser } from './auth.decorators';
 
 export const SESSION_COOKIE = 'pos_session';
@@ -24,7 +24,7 @@ export class AuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly jwt: JwtService,
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
   ) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -43,7 +43,7 @@ export class AuthGuard implements CanActivate {
     }
     if (!payload.sid) throw new UnauthorizedException('Please log in again.');
 
-    const session = await this.prisma.session.findUnique({ where: { id: payload.sid }, include: { user: true } });
+    const session = await this.db.session.findUnique({ where: { id: payload.sid }, include: { user: true } });
     if (!session || session.revokedAt || session.expiresAt < new Date() || session.userId !== payload.sub) {
       throw new UnauthorizedException('Your session has ended. Please log in again.');
     }
@@ -53,12 +53,12 @@ export class AuthGuard implements CanActivate {
     }
     // Keep "last seen" roughly current without writing on every request.
     if (Date.now() - session.lastSeenAt.getTime() > 60_000) {
-      void this.prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } }).catch(() => undefined);
+      void this.db.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } }).catch(() => undefined);
     }
 
     let counterCode: string | null = null;
     if (payload.cid) {
-      const counter = await this.prisma.counter.findUnique({ where: { id: payload.cid } });
+      const counter = await this.db.counter.findUnique({ where: { id: payload.cid } });
       if (!counter || !counter.isActive) throw new UnauthorizedException('This counter has been switched off. Please log in again.');
       counterCode = counter.code;
     }

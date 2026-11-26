@@ -1,8 +1,7 @@
-import { Prisma } from '@prisma/client';
+import { Tx } from '../config/db';
 import { holdKeys } from './keyed-lock';
 import { fyCode } from './time';
 
-type Tx = Prisma.TransactionClient;
 
 /**
  * Next number in a document series. Runs inside the caller's transaction, so the number is

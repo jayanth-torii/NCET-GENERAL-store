@@ -6,15 +6,16 @@ config({ path: join(__dirname, '..', '.env') });
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import { Prisma } from '@prisma/client';
+import Decimal from 'decimal.js';
 import cookieParser from 'cookie-parser';
 import { NextFunction, Request, Response } from 'express';
 import { readFileSync } from 'fs';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './middleware/http-exception.filter';
+import { slowRequestLogger } from './middleware/slow-request';
 
 // Money goes out as numbers with their exact decimal value; ids that are BigInt in the database go out as numbers.
-(Prisma.Decimal.prototype as unknown as { toJSON: () => number }).toJSON = function (this: Prisma.Decimal) {
+(Decimal.prototype as unknown as { toJSON: () => number }).toJSON = function (this: Decimal) {
   return this.toNumber();
 };
 (BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function (this: bigint) {
@@ -45,6 +46,7 @@ async function bootstrap() {
     next();
   });
   // API responses must never be cached by the browser.
+  app.use('/api', slowRequestLogger());
   app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Cache-Control', 'no-store');
     next();

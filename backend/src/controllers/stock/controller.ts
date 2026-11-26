@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { AdjustmentStatus } from '@prisma/client';
+import { AdjustmentStatus } from '../../models/stock/model';
 import { z } from 'zod';
 import { ClientIp, CurrentUser, R, Roles, SessionUser } from '../../middleware/auth.decorators';
 import { parse, zOptText } from '../../validators/validate';

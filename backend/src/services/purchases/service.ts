@@ -1,6 +1,8 @@
-import { invoiceKey, withTx } from '../../config/prisma.service';
+import { Loaded, Tx, Where, invoiceKey, withTx } from '../../config/db';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
-import { EntryUnit, MovementKind, Prisma, PurchaseStatus, Role } from '@prisma/client';
+import { Role } from '../../models/auth/model';
+import { EntryUnit, Purchase, PurchaseStatus } from '../../models/purchases/model';
+import { MovementKind } from '../../models/stock/model';
 import { z } from 'zod';
 import { SessionUser } from '../../middleware/auth.decorators';
 import { AuditService } from '../audit/service';
@@ -10,13 +12,12 @@ import { SettingsService } from '../settings/service';
 import { applyMovements, Movement } from '../../utils/stock-ledger';
 import { istRange } from '../../utils/time';
 import { zMoney, zOptText } from '../../validators/validate';
-import { PrismaService } from '../../config/prisma.service';
+import { DbService } from '../../config/db';
 import { calcPurchase, PurchaseCalcError } from '../../utils/purchase-calc';
 import { PurchaseHeader, PurchaseLine, PurchaseReturnInput } from '../../validators/purchases/validator';
 
 const MANAGERS: Role[] = [Role.ADMIN, Role.MANAGER];
 
-type Tx = Prisma.TransactionClient;
 
 
 export const PurchaseDraft = PurchaseHeader.extend({
@@ -37,18 +38,18 @@ const fullInclude = {
   items: { orderBy: { lineNo: 'asc' as const }, include: { product: { include: { unit: true, packUnit: true } }, returnLines: true } },
   charges: { include: { chargeType: true } },
   returns: { include: { items: true, user: { select: { fullName: true } } } },
-} satisfies Prisma.PurchaseInclude;
+};
 
 @Injectable()
 export class PurchaseService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
   ) {}
 
   private async loadSupplier(id: number) {
-    const s = await this.prisma.supplier.findUnique({ where: { id } });
+    const s = await this.db.supplier.findUnique({ where: { id } });
     if (!s) throw new BadRequestException('Supplier not found');
     if (!s.isActive) throw new BadRequestException(`${s.name} is switched off`);
     return s;
@@ -58,7 +59,7 @@ export class PurchaseService {
     await this.loadSupplier(input.supplierId);
     await this.assertInvoiceFree(input.supplierId, input.supplierInvoiceNo);
     // The GRN number is given the moment the bill is first saved, so it can be written on the supplier bill.
-    const p = await withTx(this.prisma, async (tx) =>
+    const p = await withTx(this.db, async (tx) =>
       tx.purchase.create({
         data: {
           purchaseNo: await nextDocNo(tx, 'GRN'),
@@ -76,7 +77,7 @@ export class PurchaseService {
   }
 
   private async assertInvoiceFree(supplierId: number, invoiceNo: string, exceptId?: number) {
-    const clash = await this.prisma.purchase.findFirst({
+    const clash = await this.db.purchase.findFirst({
       where: {
         supplierId,
         invoiceKey: invoiceKey(invoiceNo),
@@ -96,9 +97,9 @@ export class PurchaseService {
     await this.assertInvoiceFree(input.supplierId, input.supplierInvoiceNo, id);
 
     const productIds = [...new Set(input.lines.map((l) => l.productId))];
-    const products = await this.prisma.product.findMany({ where: { id: { in: productIds } }, include: { unit: true } });
+    const products = await this.db.product.findMany({ where: { id: { in: productIds } }, include: { unit: true } });
     const pMap = new Map(products.map((p) => [p.id, p]));
-    const chargeTypes = await this.prisma.chargeType.findMany({ where: { id: { in: input.charges.map((c) => c.chargeTypeId) } } });
+    const chargeTypes = await this.db.chargeType.findMany({ where: { id: { in: input.charges.map((c) => c.chargeTypeId) } } });
     const ctMap = new Map(chargeTypes.map((c) => [c.id, c]));
 
     const prepared = input.lines.map((l, i) => {
@@ -133,7 +134,7 @@ export class PurchaseService {
       settings.gstMode === 'REGISTERED',
     );
 
-    await withTx(this.prisma, async (tx) => {
+    await withTx(this.db, async (tx) => {
       const cur = await this.lockDraft(tx, id);
       if (cur.createdById !== user.id && !MANAGERS.includes(user.role)) {
         throw new ForbiddenException('Only the person who started this draft or a manager can change it');
@@ -220,7 +221,7 @@ export class PurchaseService {
   }
 
   /** Recompute a stored purchase with the current charge-type rules. */
-  private async computeStored(p: Prisma.PurchaseGetPayload<{ include: typeof fullInclude }>) {
+  private async computeStored(p: Loaded<Purchase>) {
     const s = await this.settings.get();
     return calcPurchase({
       lines: p.items.map((i) => ({ enteredQty: D(i.enteredQty), baseQty: D(i.baseQty), amount: D(i.grossAmount), discount: D(i.discount), gstRate: D(i.gstRate) })),
@@ -234,7 +235,7 @@ export class PurchaseService {
 
   /** Post (FR-06): blocked unless the computed total is within Rs 1 of the supplier bill. Then stock goes up at landed cost. */
   async post(id: number, user: SessionUser, ip: string) {
-    await withTx(this.prisma, 
+    await withTx(this.db, 
       async (tx) => {
         await this.lockDraft(tx, id);
         const p = await tx.purchase.findUniqueOrThrow({ where: { id }, include: fullInclude });
@@ -306,7 +307,7 @@ export class PurchaseService {
 
   /** Store keeper hands the draft to a manager. The totals must already match the supplier bill. */
   async markReady(id: number, user: SessionUser, ip: string) {
-    await withTx(this.prisma, async (tx) => {
+    await withTx(this.db, async (tx) => {
       await this.lockDraft(tx, id);
       const p = await tx.purchase.findUniqueOrThrow({ where: { id }, include: fullInclude });
       const t = await this.computeStored(p);
@@ -319,7 +320,7 @@ export class PurchaseService {
   }
 
   async deleteDraft(id: number, user: SessionUser) {
-    await withTx(this.prisma, async (tx) => {
+    await withTx(this.db, async (tx) => {
       const cur = await this.lockDraft(tx, id);
       if (cur.createdById !== user.id && !([Role.ADMIN, Role.MANAGER] as Role[]).includes(user.role)) {
         throw new ForbiddenException('Only the person who started this draft or a manager can delete it');
@@ -333,7 +334,7 @@ export class PurchaseService {
   /** Cancel a posted purchase (manager): stock taken back out with reversing movements. */
   async cancel(id: number, reason: string, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    await withTx(this.prisma, async (tx) => {
+    await withTx(this.db, async (tx) => {
       await this.claim(tx, id);
       const p = await tx.purchase.findUnique({ where: { id }, include: { items: true, returns: true } });
       if (!p) throw new NotFoundException('Purchase not found');
@@ -348,11 +349,12 @@ export class PurchaseService {
       await tx.purchase.update({ where: { id }, data: { status: PurchaseStatus.CANCELLED, cancelledAt: new Date(), cancelReason: reason } });
       // The product's cost goes back to its latest remaining posted purchase.
       for (const productId of new Set(p.items.map((i) => i.productId))) {
-        const prev = await tx.purchaseItem.findFirst({
-          where: { productId, purchase: { status: PurchaseStatus.POSTED, id: { not: id } } },
-          orderBy: { purchase: { postedAt: 'desc' } },
-          select: { landedUnitCost: true },
-        });
+        // lines of this product on other purchases -> the most recently posted of those purchases
+        const lines = await tx.purchaseItem.findMany({ where: { productId, purchaseId: { not: id } }, select: { purchaseId: true, landedUnitCost: true } });
+        const latest = lines.length
+          ? await tx.purchase.findFirst({ where: { id: { in: [...new Set(lines.map((l) => l.purchaseId))] }, status: PurchaseStatus.POSTED }, orderBy: { postedAt: 'desc' }, select: { id: true } })
+          : null;
+        const prev = latest ? lines.find((l) => l.purchaseId === latest.id) : undefined;
         await tx.product.update({ where: { id: productId }, data: { lastCost: prev?.landedUnitCost ?? null } });
       }
       await this.audit.log({ userId: user.id, action: 'PURCHASE_CANCEL', entity: 'purchase', entityId: id, ip, before: { status: p.status, purchaseNo: p.purchaseNo }, after: { status: 'CANCELLED', reason } }, tx);
@@ -363,7 +365,7 @@ export class PurchaseService {
   /** Return goods to the supplier against a posted purchase (FR-13). */
   async createReturn(id: number, input: z.infer<typeof PurchaseReturnInput>, user: SessionUser, ip: string) {
     const settings = await this.settings.get();
-    return withTx(this.prisma, async (tx) => {
+    return withTx(this.db, async (tx) => {
       await this.claim(tx, id);
       const p = await tx.purchase.findUnique({ where: { id }, include: { items: { include: { returnLines: true, product: { include: { unit: true } } } } } });
       if (!p) throw new NotFoundException('Purchase not found');
@@ -397,7 +399,7 @@ export class PurchaseService {
   }
 
   async detail(id: number) {
-    const p = await this.prisma.purchase.findUnique({ where: { id }, include: fullInclude });
+    const p = await this.db.purchase.findUnique({ where: { id }, include: fullInclude });
     if (!p) throw new NotFoundException('Purchase not found');
     const t = await this.computeStored(p);
     return {
@@ -425,7 +427,7 @@ export class PurchaseService {
   }
 
   async list(q: { from?: string; to?: string; supplierId?: number; status?: PurchaseStatus; q?: string; page: number; pageSize: number }) {
-    const where: Prisma.PurchaseWhereInput = {
+    const where: Where = {
       AND: [
         q.from && q.to ? (() => { const r = istRange(q.from!, q.to!); return { OR: [{ postedAt: { gte: r.start, lt: r.end } }, { status: PurchaseStatus.DRAFT, createdAt: { gte: r.start, lt: r.end } }, { status: PurchaseStatus.CANCELLED, createdAt: { gte: r.start, lt: r.end } }] }; })() : {},
         q.supplierId ? { supplierId: q.supplierId } : {},
@@ -434,14 +436,14 @@ export class PurchaseService {
       ],
     };
     const [rows, total] = await Promise.all([
-      this.prisma.purchase.findMany({
+      this.db.purchase.findMany({
         where,
         orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
         include: { supplier: { select: { name: true } }, createdBy: { select: { fullName: true } }, _count: { select: { items: true } } },
       }),
-      this.prisma.purchase.count({ where }),
+      this.db.purchase.count({ where }),
     ]);
     return {
       rows: rows.map((p) => ({

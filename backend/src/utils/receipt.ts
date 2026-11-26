@@ -1,13 +1,14 @@
-import { Prisma, StoreSetting } from '@prisma/client';
+import { StoreSetting } from '../models/admin/model';
+import type { Counter } from '../models/masters/model';
+import type { Sale, SaleItem, SalePayment } from '../models/sales/model';
 import type { Content, TableCell } from 'pdfmake/interfaces';
 import { D, round2 } from './money';
 import { fmtDateTime } from './time';
-import { pdfText, renderPdf } from './render-pdf';
+import { PDF_FONT, pdfText, renderPdf } from './render-pdf';
 import { fmtMoney, fmtQty } from '../models/reports/model';
 
-export type ReceiptSale = Prisma.SaleGetPayload<{
-  include: { counter: true; user: { select: { fullName: true } }; items: true; payments: true };
-}>;
+/** A sale read with include: { counter, user: { select: { fullName } }, items, payments }. */
+export type ReceiptSale = Sale & { counter: Counter; user: { fullName: string }; items: SaleItem[]; payments: SalePayment[] };
 
 function esc(s: unknown): string {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -78,7 +79,7 @@ ${sale.customerName ? `<tr><td colspan="2">Customer: ${esc(sale.customerName)}</
 <tr><td>Items total</td><td class="r">${fmtMoney(sale.itemsTotal)}</td></tr>
 ${Number(sale.discountTotal) > 0 ? `<tr><td>Discount</td><td class="r">-${fmtMoney(sale.discountTotal)}</td></tr>` : ''}
 ${Number(sale.roundOff) !== 0 ? `<tr><td>Round off</td><td class="r">${fmtMoney(sale.roundOff)}</td></tr>` : ''}
-<tr class="g"><td>TOTAL</td><td class="r">Rs ${fmtMoney(sale.grandTotal)}</td></tr>
+<tr class="g"><td>TOTAL</td><td class="r">₹${fmtMoney(sale.grandTotal)}</td></tr>
 </table><hr>
 <table class="m">${pays}
 <tr><td>Tendered</td><td class="r">${fmtMoney(sale.tendered)}</td></tr>
@@ -107,7 +108,7 @@ export function receiptPdf(sale: ReceiptSale, s: StoreSetting, size: '80mm' | 'a
   const totals: TableCell[][] = [kv('Items total', fmtMoney(sale.itemsTotal))];
   if (Number(sale.discountTotal) > 0) totals.push(kv('Discount', `-${fmtMoney(sale.discountTotal)}`));
   if (Number(sale.roundOff) !== 0) totals.push(kv('Round off', fmtMoney(sale.roundOff)));
-  totals.push(kv('TOTAL', `Rs ${fmtMoney(sale.grandTotal)}`, true));
+  totals.push(kv('TOTAL', `₹${fmtMoney(sale.grandTotal)}`, true));
   for (const p of sale.payments) totals.push(kv(`${p.mode}${p.reference ? ` (${p.reference})` : ''}`, fmtMoney(p.amount)));
   totals.push(kv('Tendered', fmtMoney(sale.tendered)));
   totals.push(kv('Change', fmtMoney(sale.changeDue), true));
@@ -140,7 +141,7 @@ export function receiptPdf(sale: ReceiptSale, s: StoreSetting, size: '80mm' | 'a
   return renderPdf({
     pageSize: narrow ? { width: 226.77, height: Math.max(300, lineCount * 11 + 60) } : 'A4',
     pageMargins: narrow ? [10, 10, 10, 14] : [40, 40, 40, 40],
-    defaultStyle: { font: narrow ? 'Courier' : 'Helvetica', fontSize: narrow ? 7.5 : 10 },
+    defaultStyle: { font: PDF_FONT, fontSize: narrow ? 7.5 : 10 },
     content,
     info: { title: pdfText(sale.billNo), creator: 'NCET Store POS v2' },
   });

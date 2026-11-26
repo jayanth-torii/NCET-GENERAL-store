@@ -1,14 +1,14 @@
 import { Controller, Get } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Role } from '../../models/auth/model';
 import { CurrentUser, SessionUser } from '../../middleware/auth.decorators';
 import { D, r2n, sum } from '../../utils/money';
 import { istDate, istDayStart, istRange } from '../../utils/time';
-import { PrismaService } from '../../config/prisma.service';
+import { DbService } from '../../config/db';
 
 /** Dashboard: today's sales, last 7 days, stock warnings and things waiting for action. */
 @Controller('dashboard')
 export class DashboardController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly db: DbService) {}
 
   @Get()
   async get(@CurrentUser() user: SessionUser) {
@@ -22,20 +22,20 @@ export class DashboardController {
     const out: Record<string, unknown> = { date: today, role: user.role };
 
     if (seesSales) {
-      const todays = await this.prisma.sale.findMany({
+      const todays = await this.db.sale.findMany({
         where: { billedAt: { gte: r.start, lt: r.end }, ...uf },
         select: { id: true, status: true, grandTotal: true },
       });
       const done = todays.filter((s) => s.status === 'COMPLETED');
-      const ret = await this.prisma.salesReturn.aggregate({ where: { createdAt: { gte: r.start, lt: r.end }, ...uf }, _sum: { total: true } });
+      const ret = await this.db.salesReturn.aggregate({ where: { createdAt: { gte: r.start, lt: r.end }, ...uf }, _sum: { total: true } });
       const pays = done.length
-        ? await this.prisma.salePayment.findMany({ where: { saleId: { in: done.map((s) => s.id) } }, select: { mode: true, amount: true } })
+        ? await this.db.salePayment.findMany({ where: { saleId: { in: done.map((s) => s.id) } }, select: { mode: true, amount: true } })
         : [];
       const weekFrom = istDate(new Date(Date.now() - 6 * 86400000));
       const days = Array.from({ length: 7 }, (_, i) => istDate(new Date(istDayStart(weekFrom).getTime() + i * 86400000 + 12 * 3600000)));
       const weekSales = own
         ? []
-        : await this.prisma.sale.findMany({ where: { status: 'COMPLETED', billedAt: { gte: istDayStart(weekFrom), lt: r.end } }, select: { billedAt: true, grandTotal: true } });
+        : await this.db.sale.findMany({ where: { status: 'COMPLETED', billedAt: { gte: istDayStart(weekFrom), lt: r.end } }, select: { billedAt: true, grandTotal: true } });
       const byDay = new Map(days.map((d) => [d, { net: D(0), bills: 0 }]));
       for (const s of weekSales) {
         const b = byDay.get(istDate(s.billedAt));
@@ -56,7 +56,7 @@ export class DashboardController {
     }
 
     if (seesStock) {
-      const prods = await this.prisma.product.findMany({ where: { isActive: true }, select: { reorderLevel: true, stock: { select: { onHand: true } } } });
+      const prods = await this.db.product.findMany({ where: { isActive: true }, select: { reorderLevel: true, stock: { select: { onHand: true } } } });
       const s = { low: 0, negative: 0 };
       for (const p of prods) {
         const on = p.stock?.onHand ?? 0;
@@ -64,10 +64,10 @@ export class DashboardController {
         else if (p.reorderLevel > 0 && on <= p.reorderLevel) s.low++;
       }
       const [pendingAdjustments, draftPurchases, readyPurchases, alerts] = await Promise.all([
-        this.prisma.stockAdjustment.count({ where: { status: 'PENDING' } }),
-        this.prisma.purchase.count({ where: { status: 'DRAFT' } }),
-        this.prisma.purchase.count({ where: { status: 'DRAFT', readyAt: { not: null } } }),
-        user.role === Role.STORE_KEEPER ? Promise.resolve([]) : this.prisma.systemAlert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: 'desc' }, take: 5 }),
+        this.db.stockAdjustment.count({ where: { status: 'PENDING' } }),
+        this.db.purchase.count({ where: { status: 'DRAFT' } }),
+        this.db.purchase.count({ where: { status: 'DRAFT', readyAt: { not: null } } }),
+        user.role === Role.STORE_KEEPER ? Promise.resolve([]) : this.db.systemAlert.findMany({ where: { resolvedAt: null }, orderBy: { createdAt: 'desc' }, take: 5 }),
       ]);
       out.stock = { low: Number(s.low), negative: Number(s.negative), pendingAdjustments, draftPurchases, readyPurchases };
       out.alerts = alerts;

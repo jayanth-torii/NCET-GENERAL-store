@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { ClientIp, CurrentUser, R, Roles, SessionUser } from '../../middleware/auth.decorators';
 import { SettingsService } from '../../services/settings/service';
 import { parse, zReason } from '../../validators/validate';
-import { PrismaService } from '../../config/prisma.service';
 import { receiptHtml, receiptPdf } from '../../utils/receipt';
 import { SalesService } from '../../services/sales/service';
 import { ReturnInput, SaleInput, SaleListQuery as ListQuery, UUID } from '../../validators/sales/validator';
@@ -18,7 +17,6 @@ function bigId(v: string): bigint {
 export class SalesController {
   constructor(
     private readonly sales: SalesService,
-    private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
   ) {}
 

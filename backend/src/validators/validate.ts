@@ -1,8 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
-import { z, ZodTypeAny } from 'zod';
+import { z } from 'zod';
 
 /** Parse a request body or query with a zod schema; reply 400 with readable messages on failure. */
-export function parse<T extends ZodTypeAny>(schema: T, data: unknown): z.infer<T> {
+export function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
   const r = schema.safeParse(data);
   if (!r.success) {
     const messages = r.error.issues.map((i) => (i.path.length ? `${i.path.join('.')}: ${i.message}` : i.message));
@@ -13,14 +13,14 @@ export function parse<T extends ZodTypeAny>(schema: T, data: unknown): z.infer<T
 
 /** Common field schemas. */
 export const zMoney = z.coerce
-  .number({ invalid_type_error: 'must be a number' })
+  .number({ error: 'must be a number' })
   .finite()
   .min(0, 'cannot be negative')
   .max(99_99_99_999, 'is too large')
   .refine((v) => Math.round(v * 100) === Number((v * 100).toFixed(6)), 'can have at most 2 decimals');
 
 export const zQty = z.coerce
-  .number({ invalid_type_error: 'must be a number' })
+  .number({ error: 'must be a number' })
   .finite()
   .positive('must be more than zero')
   .max(9_999_999, 'is too large')

@@ -1,4 +1,5 @@
-import { GstMode, Role } from '@prisma/client';
+import { GstMode } from '../../models/admin/model';
+import { Role } from '../../models/auth/model';
 import { z } from 'zod';
 import { zOptText } from '../validate';
 

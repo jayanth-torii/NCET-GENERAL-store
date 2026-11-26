@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req
 import { Request, Response } from 'express';
 import { z } from 'zod';
 import { parse } from '../../validators/validate';
-import { PrismaService } from '../../config/prisma.service';
+import { DbService } from '../../config/db';
 import { AllowLocked, AllowPasswordChangePending, ClientIp, CurrentUser, Public, R, Roles, SessionUser } from '../../middleware/auth.decorators';
 import { JwtPayload, SESSION_COOKIE } from '../../middleware/auth.guard';
 import { AuthService, SESSION_HOURS } from '../../services/auth/service';
@@ -23,7 +23,7 @@ export class AuthController {
 
   constructor(
     private readonly auth: AuthService,
-    private readonly prisma: PrismaService,
+    private readonly db: DbService,
     private readonly jwt: JwtService,
   ) {}
 
@@ -31,7 +31,7 @@ export class AuthController {
   @Public()
   @Get('counters')
   counters() {
-    return this.prisma.counter.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } });
+    return this.db.counter.findMany({ where: { isActive: true }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } });
   }
 
   /**
@@ -43,13 +43,13 @@ export class AuthController {
   async showcase() {
     if (this.showcaseCache && Date.now() - this.showcaseCache.at < 60_000) return this.showcaseCache.value;
     const [items, settings] = await Promise.all([
-      this.prisma.product.findMany({
+      this.db.product.findMany({
         where: { isActive: true },
         select: { name: true, salePrice: true, category: { select: { name: true } }, stock: { select: { onHand: true } } },
         orderBy: [{ category: { name: 'asc' } }, { name: 'asc' }],
         take: 500,
       }),
-      this.prisma.storeSetting.findUnique({ where: { id: 1 }, select: { storeName: true } }),
+      this.db.storeSetting.findUnique({ where: { id: 1 }, select: { storeName: true } }),
     ]);
     const value = {
       storeName: settings?.storeName ?? 'GENERAL STORE',

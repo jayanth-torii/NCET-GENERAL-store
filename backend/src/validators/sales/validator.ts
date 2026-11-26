@@ -1,4 +1,4 @@
-import { PaymentMode, SaleStatus } from '@prisma/client';
+import { PaymentMode, SaleStatus } from '../../models/sales/model';
 import { z } from 'zod';
 import { istDate } from '../../utils/time';
 import { zDate, zMoney, zOptText, zQty, zReason } from '../validate';

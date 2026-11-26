@@ -5,7 +5,7 @@
 <br>
 
 **Browser-based, multi-counter point of sale for the NCET campus General Store.**<br>
-Replaces Link-Zee 1.0 and follows `NCET_Store_POS_Blueprint.pdf` — now running on **MongoDB Atlas**.
+Replaces Link-Zee 1.0 and follows `NCET_Store_POS_Blueprint.pdf` — now running on **MongoDB Atlas** through **Mongoose**.
 
 [What's inside](#whats-inside) · [How it works](#how-it-works) · [Rules](#rules) · [Payments](#payments) · [Quick start](#quick-start) · [Counter PCs](#counter-pcs) · [MongoDB](#mongodb-edition) · [Moving data](#moving-data) · [Tests](#tests) · [Trade-offs](#trade-offs) · [Layout](#layout) · [Link-Zee](#link-zee)
 
@@ -150,14 +150,14 @@ One desktop shortcut per counter, with the 80 mm printer as that PC's default:
 
 | PostgreSQL edition | MongoDB edition | Where |
 |---|---|---|
-| `SERIAL` / auto-increment ids | numeric ids from an atomic `_seq` collection (URLs like `/purchases/22` keep working) | `backend/src/config/prisma.service.ts` |
+| `SERIAL` / auto-increment ids | numeric ids from an atomic `_seq` collection (URLs like `/purchases/22` keep working) | `backend/src/config/db.ts` |
 | `NUMERIC(12,2)` money | Decimal maths everywhere, stored rounded to 4 dp | `backend/src/utils/money.ts` |
 | `SELECT … FOR UPDATE` row locks | per-item queue in the one API server + MongoDB transactions retried on write conflict | `backend/src/utils/keyed-lock.ts`, `withTx` |
-| triggers making ledger + audit append-only | the database client refuses update / delete on them | `config/prisma.service.ts` |
+| triggers making ledger + audit append-only | the data layer refuses update / delete on them | `config/db.ts` |
 | partial unique indexes | MongoDB partial indexes: active product name, barcode, GRN no, live supplier invoice | `backend/src/config/mongo-indexes.ts` |
 | `INSERT … ON CONFLICT` bill counter | upsert + `$inc` inside the bill's transaction (still gapless) | `backend/src/utils/doc-number.ts` |
-| SQL aggregate reports | Prisma `groupBy` / MongoDB `$group` pipelines, figures computed in Decimal | `backend/src/services/reports/service.ts` |
-| `NULL` columns | every optional field written as `null`, so `field: null` filters match | `config/prisma.service.ts`, `config/mongo-indexes.ts` |
+| SQL aggregate reports | MongoDB `$group` pipelines through Mongoose, figures computed in Decimal | `backend/src/services/reports/service.ts` |
+| `NULL` columns | every optional field written as `null`, so `field: null` filters match | `models/<feature>/model.ts` (schema defaults), `config/mongo-indexes.ts` |
 
 </details>
 
@@ -183,7 +183,7 @@ The copy retries dropped connections batch by batch (each batch is idempotent) a
 <a name="tests"></a>
 <img src="docs/readme/h-tests.svg" alt="09 · Tests — run on MongoDB Atlas, 25-11-2026" width="100%">
 
-<img src="docs/readme/tests.svg" alt="Unit 15/15, smoke 155/155, browser 47/47, rush 12/13 with p95 2.8 s, stock check 0 differences" width="100%">
+<img src="docs/readme/tests.svg" alt="Unit 18/18, smoke 155/155, browser 47/47, rush 12/13 with p95 3.2 s, 2,000-item stock summary 1.06 s" width="100%">
 
 <details>
 <summary><b>What each test proves</b></summary>
@@ -192,13 +192,17 @@ The copy retries dropped connections batch by batch (each batch is idempotent) a
 
 | Command | What it proves | Result |
 |---|---|:-:|
-| `npm test` | bill totals (5×35 + 5×10 = 225.00), rounding, payments, landed cost, ₹1 gate, IST dates | ✅ 15 / 15 |
+| `npm test` | bill totals (5×35 + 5×10 = 225.00), rounding, payments, landed cost, ₹1 gate, IST dates, backup encryption / retention | ✅ 18 / 18 |
 | `npm run smoke` | GRNs, GST registers, roles, maker/checker, idempotency, UPI ID reuse, returns, sessions, every report as JSON / PDF / XLSX, audit trail | ✅ 155 / 155 |
 | `node scripts/e2e-ui.mjs` | a real browser: keyboard-only billing, F10, hold / recall, Ctrl+L, every page per role, GRN maker/checker, labels, tablet layout | ✅ 47 / 47 |
 | `npm run rush` | 4 counters billing the same items at once with double presses | ⚠️ 12 / 13 — speed, see trade-offs |
 | `npm run check:stock` | every product's cached balance equals its ledger | ✅ 0 differences |
+| `npm run perf:stock` | stock summary of 2,000 items (scratch database, real Atlas latency) under 2 s | ✅ median 1.06 s |
+| `npm run soak -- 30 2` | 30 minutes of steady billing + manager screens: no errors, exact stock, no slow-down | see the soak line below |
+| `npm run backup:test -- --compare-live` | newest backup restored into a scratch database, identical to live, type for type | ✅ 30 / 30 collections |
+| `node scripts/api-snapshot.mjs` | every GET route's answer saved and compared between two versions (used for the switch to Mongoose: 49 / 49 identical) | ✅ 49 / 49 |
 
-`smoke`, `rush` and `e2e-ui` create test records — run them against a development database. They need env `ADMIN_PASSWORD`.
+`smoke`, `rush`, `soak` and `e2e-ui` create test records — run them against a development database. They need env `ADMIN_PASSWORD`.
 
 </details>
 
@@ -207,7 +211,7 @@ The copy retries dropped connections batch by batch (each batch is idempotent) a
 <a name="trade-offs"></a>
 <img src="docs/readme/h-tradeoffs.svg" alt="10 · Honest trade-offs — what the cloud costs us" width="100%">
 
-<img src="docs/readme/tradeoffs.svg" alt="Billing needs the internet; about 2.8 s bill saves at rush; backups must be planned" width="100%">
+<img src="docs/readme/tradeoffs.svg" alt="Billing needs the internet; about 3 s bill saves at rush; Atlas connection drops are retried" width="100%">
 
 <details>
 <summary><b>The details</b></summary>
@@ -215,12 +219,12 @@ The copy retries dropped connections batch by batch (each batch is idempotent) a
 <br>
 
 - **Billing now needs the internet.** The PostgreSQL edition ran on the store server, so counters kept billing when the campus internet was down (a blueprint goal). With MongoDB Atlas every bill is saved in the cloud. Plan a backup connection, or run MongoDB as a replica set on the store server instead (same code, change `DATABASE_URL`).
-- **Bill save time.** Each save makes 15–20 round trips to Atlas (31–218 ms each from the store network). In the rush test — 4 counters selling the same 3 items as fast as possible — **no bill failed, none was saved twice, stock and ledger were exact, numbers gapless**, but the 95th-percentile save time was **2.8 s** against the blueprint's 300 ms (which assumed a local database).
+- **Bill save time.** Each save makes 15–20 round trips to Atlas (31–218 ms each from the store network). In the rush test — 4 counters selling the same 3 items as fast as possible — **no bill failed, none was saved twice, stock and ledger were exact, numbers gapless**, but the 95th-percentile save time was **3.2 s** (median 2.1 s) against the blueprint's 300 ms, which assumed a local database. In normal traffic a save takes about 0.9 s.
 - **One API process.** The per-item queue that replaces row locks lives inside the API server, so run a single instance.
-- **Backups.** `ops/backup.sh` is for the PostgreSQL edition. On Atlas use its backups (paid tiers) or a scheduled `mongodump` of `ncet_store`. Free (M0) clusters have no automatic backups.
-- Some connections from the store network to Atlas are refused at the TLS handshake. Reads and whole transactions are retried automatically, and the driver retries single writes once (`retryWrites=true`).
-- `npm audit` reports advisories in `prisma` (CLI), `exceljs` → `uuid` and `zod`; fixing them needs major upgrades — plan separately with the full test suite.
-- PDFs use pdfmake's built-in fonts, so amounts print as "Rs" in PDFs only (screen and Excel use ₹).
+- **Backups are built in.** The API backs up every night at 01:30 and restore-tests the newest backup on the 1st of each month (dashboard alert if either fails). Set `BACKUP_DIR`, `BACKUP_USB_DIR`, `BACKUP_CLOUD_DIR` and `BACKUP_KEY` in `backend/.env`; run `npm run backup` any time. Keep the `BACKUP_KEY` passphrase safe — without it an encrypted backup cannot be restored.
+- Some connections from the store network to Atlas are refused at the TLS handshake. Reads and whole transactions are retried automatically (about 8 s of back-off), and the driver retries single writes once (`retryWrites=true`). Requests slower than 3 s are logged by the API.
+- `DATABASE_URL` uses Atlas's standard (non-SRV) form, because Node on the store PC cannot resolve SRV records through its DNS. If Atlas moves the cluster, take the new host list from Atlas → Connect → Drivers.
+- `npm audit` reports one moderate advisory: `uuid` inside `exceljs` (buffer bounds in `v3`/`v5`/`v6` with a buffer argument). exceljs only calls `v4()` without one, so it is not reachable; npm's own fix would downgrade exceljs to 3.4.0.
 
 </details>
 
